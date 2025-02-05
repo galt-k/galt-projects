@@ -1,0 +1,8 @@
+[package]
+name = "expresso"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+thiserror = "1.0" # For custom error handling
+tokio = {version = "1.0", features = ["full"]} # for async I/O 
