@@ -1,0 +1,1 @@
+/Users/revanthkatanguri/Projects/galt-projects/metalog/target/debug/metalog: /Users/revanthkatanguri/Projects/galt-projects/metalog/src/lib.rs /Users/revanthkatanguri/Projects/galt-projects/metalog/src/main.rs

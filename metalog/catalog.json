@@ -1,0 +1,1 @@
+[{"name":"users","columns":[{"name":"id","data_type":"integer","is_nullable":false},{"name":"name","data_type":"string","is_nullable":true}]}]
