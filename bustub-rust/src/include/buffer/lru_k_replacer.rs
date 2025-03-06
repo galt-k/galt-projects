@@ -1,5 +1,4 @@
-use crate::include::common::config::{ FrameId, AccessType };
-
+use crate::include::common::config::{AccessType, FrameId};
 
 pub trait LRUKReplacer {
     fn new(num_frames: usize, k: usize) -> Self;
