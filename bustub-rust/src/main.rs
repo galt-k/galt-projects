@@ -1,6 +1,6 @@
 //crate::include::lru_k_replacer
-mod include;
 mod buffer;
+mod include;
 fn main() {
     println!("Hello, world!");
 }
