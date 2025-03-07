@@ -2,6 +2,7 @@
 name = "bustub-rust"
 version = "0.1.0"
 edition = "2021"
+path = "src/lib.rs"
 
 [dependencies]
 rand = "0.8.5"

@@ -1,13 +1,12 @@
 use rand::Rng;
 use std::collections::{HashMap, LinkedList};
-use std::f32::MIN;
 use std::sync::Mutex;
 use std::usize;
 
 use crate::include::buffer::lru_k_replacer::LRUKReplacer;
 use crate::include::common::config::{AccessType, FrameId};
 
-struct LRUKNode {
+pub struct LRUKNode {
     history: LinkedList<usize>,
     k_: usize,
     frame_id: FrameId,
@@ -47,26 +46,24 @@ impl LRUKReplacer for LRUKReplacerImpl {
                 if let Some(&kth_time) = node.history.front() {
                     if min_frame_id.is_none() || kth_time < min_kth_time {
                         min_frame_id = Some(frame_id);
-                        min_kth_time = kth_time; 
+                        min_kth_time = kth_time;
                     }
                 }
-            }            
-                
-                // frame_id is None {
-                //     frame_id = frame_id
-                //     let min_global_time = node.history.front();
-                // } else {
-                //     min_curr_time = MIN(min_global_time, node.history.front());
-                //     if min_curr_time < min_global_time {
-                //         min_frame_id = frame_id;
-                //         min_global_time = min_curr_time;
-                //     }
+            }
 
-                // }
+            // frame_id is None {
+            //     frame_id = frame_id
+            //     let min_global_time = node.history.front();
+            // } else {
+            //     min_curr_time = MIN(min_global_time, node.history.front());
+            //     if min_curr_time < min_global_time {
+            //         min_frame_id = frame_id;
+            //         min_global_time = min_curr_time;
+            //     }
+
+            // }
         }
         min_frame_id
-
-
     }
 
     fn record_access(&mut self, frame_id: FrameId, access_type: AccessType) {
