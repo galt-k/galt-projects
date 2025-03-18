@@ -1,24 +1,35 @@
 use crate::include::common::config::PageId;
+//use crate::include::storage::disk::disk_manager::DiskManager;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::sync::{Arc, Mutex}; 
 use std::path::Path;
 
+#[derive(Clone)]
+pub struct DiskManager {
+    pub db_file: String,        // file path eg- "test.db"
+    pub file: Arc<Mutex<File>>, // Open file handle
+}
+
 
 impl DiskManager {
-    fn new(db_file: &str) -> io::Result<Self> {
-        let file = OpenOptions::new().read(true).append(true).create(true).open(db_file)?;
+    pub fn new(db_file: &str) -> io::Result<Self> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(db_file)?;
         Ok(Self {
             db_file: db_file.to_string(),
-            file: Arc::new(Mutex::new(file)), // wrapping in Arc mutex- clone works
+            file: Arc::new(Mutex::new(file)),
         })
     }
-    fn read_page(&mut self, page_id: PageId, data: &mut [u8]) -> io::Result<()> {
-        //lock thread safe
+
+    pub fn read_page(&self, page_id: PageId, data: &mut [u8]) -> io::Result<()> {
         let mut file = self.file.lock().unwrap();
-        file.seek(SeekFrom::Starrt(0))?;
+        file.seek(SeekFrom::Start(0))?;
         let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer);
+        file.read_to_end(&mut buffer)?;
 
         let entry_size = 4 + 4096;
         let mut last_match = None;
@@ -34,19 +45,17 @@ impl DiskManager {
                 data.copy_from_slice(&buffer[pos + 4..pos + 4 + 4096]);
                 Ok(())
             }
-            None => Err(io::Error::new(io::ErrorKind::NotFound,"Page not found")),
+            None => Err(io::Error::new(io::ErrorKind::NotFound, "Page not found")),
         }
-
     }
 
-
-    fn write_page(&self, page_id: PageId, data: &mut [u8]) {
-        let mut file = self.file.lock().unwrap(); // Lock—thread-safe—unwrap ok for Task 2
+    pub fn write_page(&self, page_id: PageId, data: &[u8]) -> io::Result<()> {
+        let mut file = self.file.lock().unwrap();
         let mut buffer = Vec::new();
-        buffer.extend_from_slice(&page_id.to_le_bytes()); // page_id—4 bytes
-        buffer.extend_from_slice(data); // Data—assume 4096 bytes—Task 2 page size
-        file.write_all(&buffer)?; // Append—your design
-        file.flush()?; // Ensure written—C++ flushes—Task 2 reliability
+        buffer.extend_from_slice(&page_id.to_le_bytes());
+        buffer.extend_from_slice(data);
+        file.write_all(&buffer)?;
+        file.flush()?;
         Ok(())
     }
 }
