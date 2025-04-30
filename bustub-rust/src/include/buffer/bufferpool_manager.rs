@@ -1,12 +1,6 @@
 use crate::include::common::config::{AccessType, FrameId, PageId};
-
-pub struct FrameHeader {
-    frame_id: FrameId,
-    page_id: PageId,
-    pin_count: integer,
-    is_dirty: bool,
-    data: string // Sequnce of bytes
-}
+use std::any::Any;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 pub trait FrameHeaderImpl {
     // Return a read-only view of the frame's raw memory as bytes.  
@@ -15,10 +9,12 @@ pub trait FrameHeaderImpl {
     fn get_data_mut(&mut self) -> &mut [u8];
     // Clear or reset the frame's content
     fn reset(&mut self);
-    // return the page_id that the frame is currently holding
-    fn get_page_id(&self) -> PageId;
+    fn get_frame_id(&self) -> FrameId;
     // Set the new page_id that the frame has to hold
-    fn set_page_id(&self) -> PageId;
+    // return the page_id that the frame is currently holding
+    fn get_page_id(&self) -> Option<PageId>;
+    // Set the new page_id that the frame has to hold
+    fn set_page_id(&mut self, page_id: PageId) -> PageId;
     // get the current pin count of the frame
     fn get_pin_count(&self) -> usize;
     // increment pin count
@@ -28,11 +24,11 @@ pub trait FrameHeaderImpl {
     // True if the frame has been recently modified and needs to be written back to disk. 
     fn is_dirty(&self) -> bool;
     // True if the frame has been recently modified and needs to be written back to disk. 
-    fn set_is_dirty(&self, is_dirty: bool);
+    fn set_is_dirty(&mut self, is_dirty: bool);
     // Acquire a read latch to safely read the frame concurrently. 
-    fn read_latch(&self) -> Box<dyn Any>;
+    fn read_latch(&self) -> RwLockReadGuard<()>;
     // Acquire a write latch (exclusive access) to modify the frame without reference. 
-    fn write_latch(&self) -> Box<dyn Any>;
+    fn write_latch(&self) -> RwLockWriteGuard<()>;
 }
 
 pub trait BufferPoolManagerImpl {
