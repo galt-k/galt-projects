@@ -44,7 +44,7 @@ fn test_bpm_read_page(){
             Arc::new(scheduler),
             Arc::new(lru_k_replacer_impl),
         );
-        
+
     // Create Write request
     {
         let mut write_page_guard= bpm.write_page(0, Index);
@@ -54,16 +54,17 @@ fn test_bpm_read_page(){
         assert_eq!(page_data_ref.len(), PAGE_SIZE);
         let new_value = [1u8; PAGE_SIZE];
         page_data_ref.copy_from_slice(&new_value);
+        write_page_guard.flush();
     }
-
-    //Create a read request
+    // Create a read request
     {
         let expected_value = [1u8; PAGE_SIZE];
-        let read_page_guard=bpm.read_page(0, Index);
+        let read_page_guard = bpm.read_page(0, Index);
         let read_page_ref = read_page_guard.as_ref();
+        read_page_guard.flush();
         assert_eq!(read_page_ref.len(), PAGE_SIZE, "length doesnt match");
         assert_eq!(read_page_ref, expected_value, "Values are equal");
         assert_eq!(read_page_ref[0], 1,"Value at index 0 is 1");
-    }
 
+    }
 }

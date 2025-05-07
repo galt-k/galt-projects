@@ -146,6 +146,7 @@ impl BufferPoolManager {
             return Some((frame_id, self.frames[frame_id as usize].clone()));
         
         // placeholder: use a replacer to evict a frame???
+
         }
 
         None
@@ -156,9 +157,11 @@ impl BufferPoolManagerImpl for BufferPoolManager {
     fn size(&self) -> usize {
         self.num_frames
     }
-    
+    /// Allocates a newpage (default) on disk and in-memory. 
     fn new_page(&self) -> PageId {
+        // create a new pageid
         let page_id = self.next_page_id.fetch_add(1, Ordering::SeqCst);
+        // Check if we can create a new frame
         page_id
     }
 
@@ -177,7 +180,8 @@ impl BufferPoolManagerImpl for BufferPoolManager {
 
     fn checked_read_page(&self, page_id: PageId, access_type: AccessType) -> Option<ReadPageGuard> {
         if let Some((frame_id, frame)) = self.fetch_frame(page_id) {
-            Some(ReadPageGuard::new(page_id, frame, self.replacer.clone(), self.bpm_latch.clone(), self.disk_scheduler.clone(), Arc::new(self.clone()),))
+            //&self.replacer.record_access(frame_id, access_type);
+            Some(ReadPageGuard::new(page_id,frame_id, frame, self.replacer.clone(), self.bpm_latch.clone(), self.disk_scheduler.clone(), Arc::new(self.clone()),))
         } else {
             None
         }
@@ -192,7 +196,7 @@ impl BufferPoolManagerImpl for BufferPoolManager {
 
     fn checked_write_page(&self, page_id: PageId, access_type: AccessType) -> Option<WritePageGuard> {
         if let Some((frame_id, frame)) = self.fetch_frame(page_id) {
-            Some(WritePageGuard::new(page_id, frame, self.replacer.clone(), self.bpm_latch.clone(), self.disk_scheduler.clone(), Arc::new(self.clone()),))
+            Some(WritePageGuard::new(page_id,frame_id ,frame, self.replacer.clone(), self.bpm_latch.clone(), self.disk_scheduler.clone(), Arc::new(self.clone()),))
         } else {
             None
         }

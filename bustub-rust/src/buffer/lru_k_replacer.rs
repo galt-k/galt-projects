@@ -5,6 +5,7 @@ use std::usize;
 
 use crate::include::buffer::lru_k_replacer::LRUKReplacer;
 use crate::include::common::config::{AccessType, FrameId};
+use std::cell::RefCell;
 
 pub struct LRUKNode {
     history: LinkedList<usize>,
@@ -14,34 +15,34 @@ pub struct LRUKNode {
 }
 
 pub struct LRUKReplacerImpl {
-    node_store_: HashMap<FrameId, LRUKNode>,
-    curr_size_: usize,
+    node_store_: RefCell<HashMap<FrameId, LRUKNode>>,
+    curr_size_: RefCell<usize>,
     replacer_size_: usize,
     k_: usize,
     latch_: Mutex<()>,
-    current_timestamp_: usize,
+    current_timestamp_: RefCell<usize>,
 }
 
 impl LRUKReplacer for LRUKReplacerImpl {
     fn new(num_frames: usize, k: usize) -> Self {
         LRUKReplacerImpl {
-            node_store_: HashMap::new(),
-            curr_size_: 0,
+            node_store_: RefCell::new(HashMap::new()),
+            curr_size_: RefCell::new(0),
             replacer_size_: num_frames,
             k_: k,
             latch_: Mutex::new(()),
-            current_timestamp_: 0,
+            current_timestamp_: RefCell::new(0),
         }
     }
 
-    fn evict(&mut self) -> Option<FrameId> {
+    fn evict(&self) -> Option<FrameId> {
         let _gaurd = self.latch_.lock().unwrap();
         // let random_frame_id = rand::thread_rng().gen_range(0..self.replacer_size_) as FrameId;
         // Some(random_frame_id)
 
         let mut min_frame_id: Option<FrameId> = None;
         let mut min_kth_time: usize = usize::MAX;
-        for (&frame_id, node) in self.node_store_.iter() {
+        for (&frame_id, node) in self.node_store_.borrow().iter() {
             if node.is_evictable {
                 if let Some(&kth_time) = node.history.front() {
                     if min_frame_id.is_none() || kth_time < min_kth_time {
@@ -66,49 +67,55 @@ impl LRUKReplacer for LRUKReplacerImpl {
         min_frame_id
     }
 
-    fn record_access(&mut self, frame_id: FrameId, access_type: AccessType) {
+    fn record_access(&self, frame_id: FrameId, access_type: AccessType) {
         // TODO:
         let _gaurd = self.latch_.lock().unwrap();
-        let node = self.node_store_.entry(frame_id).or_insert(LRUKNode {
+        let mut node_store = self.node_store_.borrow_mut();
+        let mut timestamp = self.current_timestamp_.borrow_mut(); 
+        let node = node_store.entry(frame_id).or_insert(LRUKNode {
             history: LinkedList::new(),
             k_: self.k_,
             frame_id: frame_id,
             is_evictable: false,
         });
-        node.history.push_back(self.current_timestamp_);
+        node.history.push_back(*timestamp);
         if node.history.len() > node.k_ {
             node.history.pop_front();
         }
-        self.current_timestamp_ += 1;
+        *timestamp += 1;
     }
 
-    fn set_evictable(&mut self, frame_id: FrameId, set_evictable: bool) {
+    fn set_evictable(&self, frame_id: FrameId, set_evictable: bool) {
         // get the LRUK node from the map
         let _gaurd = self.latch_.lock().unwrap();
-        if let Some(node) = self.node_store_.get_mut(&frame_id) {
+        let mut node_store = self.node_store_.borrow_mut();
+        let mut curr_size = self.curr_size_.borrow_mut();
+        if let Some(node) = node_store.get_mut(&frame_id) {
             if node.is_evictable != set_evictable {
                 node.is_evictable = set_evictable;
                 if set_evictable {
-                    self.curr_size_ += 1;
+                    *curr_size += 1;
                 } else {
-                    self.curr_size_ -= 1;
+                    *curr_size -= 1;
                 }
             }
         }
     }
 
-    fn remove(&mut self, frame_id: FrameId) {
+    fn remove(&self, frame_id: FrameId) {
         // Here I think, we might need to deal with memory cleanup or deleting the map for the frame ID
         let _gaurd = self.latch_.lock().unwrap();
-        if let Some(node) = self.node_store_.remove(&frame_id) {
+        let mut node_store = self.node_store_.borrow_mut();
+        let mut curr_size = self.curr_size_.borrow_mut();
+        if let Some(node) = node_store.remove(&frame_id) {
             if node.is_evictable {
-                self.curr_size_ -= 1
+                *curr_size -= 1
             }
         }
     }
 
     fn size(&self) -> usize {
         let _gaurd = self.latch_.lock().unwrap();
-        self.curr_size_
+        *self.curr_size_.borrow()
     }
 }

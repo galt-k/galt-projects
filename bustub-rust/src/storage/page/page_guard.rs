@@ -1,15 +1,21 @@
 use std::sync::{Arc, Mutex};
 use crate::buffer::bufferpool_manager::{BufferPoolManager, FrameHeader};
 use crate::include::buffer::bufferpool_manager::{BufferPoolManagerImpl, FrameHeaderImpl};
-use crate::include::common::config::{PageId,FrameId};
+use crate::include::common::config::{AccessType, FrameId, PageId};
 use crate::include::storage::page::page_guard::{PageguardImpl,ReadPageGuardImpl,WritePageGuardImpl};
 use crate::buffer::lru_k_replacer::LRUKReplacerImpl;
 use crate::storage::disk::disk_scheduler::DiskScheduler;
+use crate::include::buffer::lru_k_replacer::LRUKReplacer;
+use crate::include::storage::disk::disk_scheduler::DiskRequest;
+use crate::include::storage::disk::disk_scheduler::DiskSchedulerTrait;
+use std::sync::mpsc::channel;
+
+
 //use std::alloc::Global;
 pub struct BasicPageGuard {
     bpm: Arc<BufferPoolManager>,
     frame: Arc<FrameHeader>,
-    //frame_id: FrameId
+    frame_id: FrameId,
     page_id: PageId,
     is_valid: bool,
 }
@@ -18,13 +24,14 @@ impl BasicPageGuard {
     pub fn new (
         bpm : Arc<BufferPoolManager>,
         frame: Arc<FrameHeader>,
-        //frame_id: FrameId,
+        frame_id: FrameId,
         page_id: PageId,
     ) -> Self {
         frame.increment_pin_count();// Why is this required here?
         BasicPageGuard {
             bpm,
             frame,
+            frame_id,
             page_id,
             is_valid: true,
         }
@@ -48,7 +55,7 @@ impl PageguardImpl for BasicPageGuard {
     }
     // not needed for now. 
     fn get_frame_id(&self) -> FrameId {
-        self.page_id
+        self.frame_id
     }
 }
 
@@ -71,13 +78,15 @@ pub struct ReadPageGuard {
 impl ReadPageGuard {
     pub fn new(
         page_id: PageId,
+        frame_id: FrameId,
         frame: Arc<FrameHeader>, 
         replacer: Arc<LRUKReplacerImpl>,
         bpm_latch: Arc<Mutex<()>>,
         disk_scheduler: Arc<DiskScheduler>,
         bpm: Arc<BufferPoolManager>,
     ) -> Self {
-        let guard = BasicPageGuard::new(bpm, frame, page_id);
+        let guard = BasicPageGuard::new(bpm, frame,frame_id, page_id);
+        replacer.record_access(guard.get_frame_id(), AccessType::Unknown);
         ReadPageGuard {
             guard,
             replacer,
@@ -105,6 +114,9 @@ impl PageguardImpl for ReadPageGuard {
 }
 impl ReadPageGuardImpl for ReadPageGuard {
     fn as_ref(&self) -> &[u8] {
+        //add the lru k record access here. 
+        //let mut replacer= &self.replacer.lock().unwrap();
+        //replacer.record_access(&self.get_frame_id(), AccessType::Unknown);
         self.guard.frame.get_data()
     }
 
@@ -114,6 +126,16 @@ impl ReadPageGuardImpl for ReadPageGuard {
 
     fn flush(&self) {
         // Placeholder: use disk scduler to flush the frame data to disk. 
+        if self.is_dirty() {
+            let data = self.guard.frame().get_data();
+            let request = DiskRequest {
+                is_write: true,
+                page_id: self.get_page_id(),
+                data: Arc::new(Mutex::new(data.to_vec())),
+                is_done: channel().0,
+            };
+            self.disk_scheduler.schedule(request);
+        }
     }   
 }
 
@@ -135,13 +157,15 @@ pub struct WritePageGuard {
 impl WritePageGuard {
     pub fn new(
         page_id: PageId,
+        frame_id: FrameId,
         frame: Arc<FrameHeader>,
         replacer: Arc<LRUKReplacerImpl>,
         bpm_latch: Arc<Mutex<()>>,
         disk_scheduler: Arc<DiskScheduler>,
         bpm: Arc<BufferPoolManager>,
     ) -> Self {
-        let guard = BasicPageGuard::new(bpm, frame, page_id);
+        let guard = BasicPageGuard::new(bpm, frame,frame_id, page_id);
+        replacer.record_access(guard.get_frame_id(), AccessType::Unknown);
         WritePageGuard {
             guard,
             replacer,
