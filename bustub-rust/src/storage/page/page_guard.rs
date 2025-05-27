@@ -208,6 +208,16 @@ impl WritePageGuardImpl for WritePageGuard {
 
     fn flush(&self) {
         // Placeholder: Use disk_scheduler to flush frame data
+        if self.is_dirty() {
+            let data = self.guard.frame().get_data();
+            let request = DiskRequest {
+                is_write: true,
+                page_id: self.get_page_id(),
+                data: Arc::new(Mutex::new(data.to_vec())),
+                is_done: channel().0,
+            };
+            self.disk_scheduler.schedule(request);
+        }
     }
 }
 
