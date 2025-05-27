@@ -10,6 +10,7 @@ use super::lru_k_replacer::LRUKReplacerImpl;
 
 use crate::storage::page::page_guard::{ReadPageGuard,WritePageGuard};
 
+#[derive(Debug)]
 pub struct FrameHeader {
     frame_id: FrameId,
     page_id: Mutex<Option<PageId>>, // There can be a frame with no page in it. 
@@ -104,7 +105,7 @@ pub struct BufferPoolManager {
     next_page_id: AtomicI32,
     bpm_latch: Arc<Mutex<()>>,
     frames: Vec<Arc<FrameHeader>>,
-    page_table: Mutex<HashMap<PageId, FrameId>>, 
+    pub page_table: Mutex<HashMap<PageId, FrameId>>, 
     free_frames: Mutex<LinkedList<FrameId>>,
     replacer: Arc<LRUKReplacerImpl>,
     disk_scheduler: Arc<DiskScheduler>,
@@ -137,8 +138,12 @@ impl BufferPoolManager {
     fn fetch_frame(&self, page_id: PageId) -> Option<(FrameId, Arc<FrameHeader>)> {
         let mut page_table = self.page_table.lock().unwrap();
         if let Some(&frame_id) = page_table.get(&page_id) {
+            // print the page table
+            //println!("page table {:?}", page_table);
+            //println!("frame {:?}", self.frames[frame_id as usize].clone());
             return Some((frame_id, self.frames[frame_id as usize].clone()));
         }
+        //println!("page table {:?}", page_table);
         // if not create a new frame
         let mut free_frames = self.free_frames.lock().unwrap(); 
         if let Some(frame_id) = free_frames.pop_front() {
