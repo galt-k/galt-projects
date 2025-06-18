@@ -17,7 +17,7 @@ impl BplusTreeInternalPageImpl for BplusTreeInternalPage {
     fn new(max_size: i32, page_id: PageId) -> Self {
         let base_page = BplusTreePage::new(IndexPageType::INTERNAL_PAGE, 0, max_size, page_id);                 
         
-        let key_array = [1000;INTERNAL_PAGE_SLOT_CNT];
+        let key_array = [-1;INTERNAL_PAGE_SLOT_CNT];
         //let rid_array = [Rid::new(INVALID_PAGE_ID, 0); LEAF_PAGE_SLOT_CNT as usize];
         let page_id_array = [INVALID_PAGE_ID; INTERNAL_PAGE_SLOT_CNT as usize];
         BplusTreeInternalPage {

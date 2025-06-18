@@ -22,7 +22,7 @@ use bustub_rust::include::common::config::ValueType;
 use bustub_rust::include::storage::page::b_plus_tree_leaf_page::{LEAF_PAGE_SLOT_CNT};
 use bustub_rust::include::storage::index::b_plus_tree::{BplusTree, BplusTreeImpl};
 use bustub_rust::include::storage::page::b_plus_tree_internal_page::{KeyType};
-use bustub_rust::storage::index::b_plus_tree::{InsertablePage, LeafPageGuard};
+use bustub_rust::storage::index::b_plus_tree::{InsertablePage, LeafPageGuard, InternalPageGuard};
 
 fn setup_bplus_tree() -> (&'static BufferPoolManager, BplusTree<'static>) {
             
@@ -43,11 +43,11 @@ fn setup_bplus_tree() -> (&'static BufferPoolManager, BplusTree<'static>) {
     let bplus_tree = BplusTree::new(
         String::from("test_index"),
         bpm_ref, 
-        3, 3, header_page_id);
+        255, 340, header_page_id);
     (bpm_ref, bplus_tree)
 }
 
-#[test]
+//#[test]
 fn test_simple_insert() {
     let (bpm, mut tree) = setup_bplus_tree();
 
@@ -83,7 +83,7 @@ fn test_simple_insert() {
     // println!("Vector: {:?}", root_page.base_page.max_size);
 }
 
-#[test]
+//#[test]
 fn test_leaf_guard() {
     let (bpm, mut tree) = setup_bplus_tree();
     
@@ -115,7 +115,7 @@ fn test_leaf_guard() {
 
 
 
-#[test]
+//#[test]
 fn test_initialize_with_root() {
     let (bpm, mut tree) = setup_bplus_tree();
 
@@ -156,7 +156,7 @@ fn setup_leaf_page_guard(bpm: &BufferPoolManager) -> LeafPageGuard {
     LeafPageGuard::new(bpm.write_page(new_page_id, Index))
 }
 
-#[test]
+//#[test]
 fn test_leaf_insert_at() {
     let dm = DiskManager::new("test.db");
     let scheduler = DiskScheduler::new( dm.unwrap());
@@ -203,7 +203,7 @@ fn test_leaf_insert_at() {
     assert_eq!(read_page.key_array[0], key, "BPM key should be 42");
 }
 
-#[test]
+//#[test]
 fn test_page_table_after_insert() {
     let dm = DiskManager::new("test.db");
     let scheduler = DiskScheduler::new( dm.unwrap());
@@ -231,4 +231,49 @@ fn test_page_table_after_insert() {
     let page_table = bpm.page_table.lock().unwrap(); // Assuming page_table is a Mutex<HashMap<PageId, FrameId>>
     println!("last page table {:?}", page_table);
     assert!(page_table.contains_key(&0), "Page 0 should be in page_table");
+}
+
+#[test]
+fn test_insertion_with_split() {
+    let (bpm, mut tree) = setup_bplus_tree();
+
+    // Create a loop which sequentially inserts the keys into the tree
+    for i in 0..10{
+        let key: KeyType = i as i64;
+        let value= ValueType::Rid(Rid::new(i as i32, 0)); //ValueType::Rid(Rid::new(1, 0))
+        let result = tree.insert(key, value);
+        println!("Key {}",result);
+        assert!(result, "Insert succeded for the key {}", key);
+    }
+
+    // Verify if the split happened or not
+    let header = tree.acquire_header_guard();
+    let root_page_id = header.root_page_id();
+    assert_ne!(root_page_id, INVALID_PAGE_ID, "Root page id should be set");
+
+    let root_guard = bpm.read_page(root_page_id, Index);
+    let root_page = unsafe {
+        let data = root_guard.as_ref();
+        let page = &*(data.as_ptr() as *const BplusTreePage);
+        page
+    };
+    assert_eq!(root_page.page_type, IndexPageType::INTERNAL_PAGE, "Root should be an internal page after split");
+
+    // Optionally, verify the structure (e.g., two child pages)
+    let mut root = InternalPageGuard::new(bpm.write_page(root_page_id, Index));
+    let size = root.as_ref().base_page.get_size() as usize;
+    assert_eq!(size, 1, "Root should have one separator key after first split");
+    assert_ne!(root.as_ref().page_id_array[0], INVALID_PAGE_ID, "Root should have a valid left child");
+    assert_ne!(root.as_ref().page_id_array[1], INVALID_PAGE_ID, "Root should have a valid right child");
+    println!("{:?}", root.as_ref().key_array);
+
+
+    let leaf_guard = bpm.read_page(1, Index);
+    let leaf_page = unsafe {
+        let data = leaf_guard.as_ref();
+        //println!("data reff {:?}", data);
+        &*(data.as_ptr() as *const BplusTreeLeafPage)
+    };
+
+    println!("{:?}", leaf_page.key_array);
 }

@@ -29,6 +29,5 @@ pub trait BplusTreeInternalPageImpl {
     /// returns the child page id at the specfied index
     fn value_at(&self, index: i32) -> PageId;
     fn to_string(&self) -> String;
-
 }
 

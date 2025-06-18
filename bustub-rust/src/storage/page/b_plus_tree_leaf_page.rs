@@ -13,6 +13,7 @@ impl BplusTreeLeafPageImpl for BplusTreeLeafPage {
         let base_page = BplusTreePage::new(IndexPageType::LEAF_PAGE, 0, max_size, page_id);                 
         let next_page_id = INVALID_PAGE_ID;
         let key_array = [0;LEAF_PAGE_SLOT_CNT];
+        let leaf_slot_count = LEAF_PAGE_SLOT_CNT;
         let rid_array = [Rid::new(INVALID_PAGE_ID, 0); LEAF_PAGE_SLOT_CNT as usize];
 
         BplusTreeLeafPage {
@@ -54,6 +55,8 @@ impl BplusTreeLeafPageImpl for BplusTreeLeafPage {
 
     fn insert(&mut self, index: i32, key: KeyType, value: ValueType) -> bool {
         
+
+
         // check if the index isn't full 
         if index < 0 || index > self.base_page.get_size() || self.base_page.get_size() >= self.base_page.get_max_size() {
             return false
