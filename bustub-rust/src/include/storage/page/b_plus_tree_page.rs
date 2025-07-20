@@ -20,3 +20,9 @@ pub trait BplusTreePageImpl {
     fn set_max_size(&mut self, max_size: i32);
     fn get_min_size(&self) -> i32;    
 }
+
+pub trait BplusTreePageTrait {
+    fn is_leaf(&self) -> bool;
+    fn max_size(&self) -> i32;
+    fn get_size(&self) -> i32;
+}

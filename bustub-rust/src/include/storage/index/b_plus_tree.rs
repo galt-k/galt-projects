@@ -2,6 +2,8 @@ use crate::include::buffer::bufferpool_manager::BufferPoolManagerImpl;
 use crate::buffer::bufferpool_manager::BufferPoolManager;
 use crate::include::common::config::{PageId, ValueType};
 use crate::include::storage::page::b_plus_tree_internal_page::KeyType;
+use crate::include::storage::page::b_plus_tree_page::{BplusTreePage, BplusTreePageTrait};
+use std::collections::HashMap;
 
 pub struct BplusTree<'a> {
     pub index_name: String,
@@ -9,7 +11,9 @@ pub struct BplusTree<'a> {
     pub log: Vec<String>,
     pub leaf_max_size: i32,
     pub internal_max_size: i32,
-    pub header_page_id: PageId
+    pub header_page_id: PageId,
+    pub parent_map: HashMap<PageId, PageId>,
+
 }
 
 pub trait BplusTreeImpl {
@@ -25,6 +29,8 @@ pub trait BplusTreeImpl {
     fn get_root_page_id(&mut self) -> PageId;
     // Index Iterator
     fn begin(&self); // Index Iterator Type?????
+    fn is_safe_to_insert(&self, page: &dyn BplusTreePageTrait)-> bool;
+    //fn split_leaf(&self, leaf_page: &mut BplusTreeLeafPage) -> (LeafPageGuard, i64);
 
 }
 
