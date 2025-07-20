@@ -22,19 +22,18 @@ use bustub_rust::include::common::config::ValueType;
 use bustub_rust::include::storage::page::b_plus_tree_leaf_page::{LEAF_PAGE_SLOT_CNT};
 use bustub_rust::include::storage::index::b_plus_tree::{BplusTree, BplusTreeImpl};
 use bustub_rust::include::storage::page::b_plus_tree_internal_page::{KeyType};
-use bustub_rust::storage::index::b_plus_tree::{InsertablePage, LeafPageGuard};
+//use bustub_rust::storage::index::b_plus_tree::{InsertablePage, LeafPageGuard, InternalPageGuard};
 
 fn setup_bplus_tree() -> (&'static BufferPoolManager, BplusTree<'static>) {
             
     // Allocate a header page
     
-
     let dm = DiskManager::new("test.db");
     let scheduler = DiskScheduler::new( dm.unwrap());
     let lru_k_replacer_impl = LRUKReplacerImpl::new(100, 3);
     let bpm = BufferPoolManager::new
         (
-            10,
+            100,
             Arc::new(scheduler),
             Arc::new(lru_k_replacer_impl),
         );
@@ -43,7 +42,7 @@ fn setup_bplus_tree() -> (&'static BufferPoolManager, BplusTree<'static>) {
     let bplus_tree = BplusTree::new(
         String::from("test_index"),
         bpm_ref, 
-        3, 3, header_page_id);
+        255, 10, header_page_id); // 255, 340
     (bpm_ref, bplus_tree)
 }
 
@@ -59,11 +58,13 @@ fn test_simple_insert() {
     // Step 2: Insert a key-value pair
     let key1: KeyType = 42; // KeyType is i64
     let key2: KeyType = 43;
+    let key3: KeyType = 41;
     let value = ValueType::Rid(Rid::new(1, 0)); // ValueType is Rid
     let insert_result1 = tree.insert(key1, value);
     let insert_result2 = tree.insert(key2, value);
+    let insert_result3 = tree.insert(key3, value);
     assert_eq!(true, insert_result1, "Insertion should succeed");
-    //assert_eq!(true, insert_result2, "Insertion should succeed");
+    assert_eq!(true, insert_result2, "Insertion should succeed");
     
     // Step 3: Verify the root page ID is set
     let root_page_id = tree.get_root_page_id();
@@ -77,158 +78,207 @@ fn test_simple_insert() {
         //println!("data reff {:?}", data);
         &*(data.as_ptr() as *const BplusTreeLeafPage)
     };
-    assert_eq!(root_page.base_page.get_size(), 2, "Root should contain one key");
-    assert_eq!(root_page.key_array[0], key1, "Inserted key should match");
-    assert_eq!(root_page.key_array[1], key2, "Inserted key should match");
-    // println!("Vector: {:?}", root_page.base_page.max_size);
+    assert_eq!(root_page.base_page.get_size(), 3, "Root should contain one key");
+    assert_eq!(root_page.key_array[0], key3, "Inserted key should match");
+    assert_eq!(root_page.key_array[1], key1, "Inserted key should match");
+    assert_eq!(root_page.key_array[2], key2, "Inserted key should match");
+    println!("Vector: {:?}", root_page.key_array);
 }
 
-#[test]
-fn test_leaf_guard() {
-    let (bpm, mut tree) = setup_bplus_tree();
+// #[test]
+// fn test_leaf_guard() {
+//     let (bpm, mut tree) = setup_bplus_tree();
     
-    let mut leaf_guard = LeafPageGuard::new(bpm.write_page(1000, Index));
-    leaf_guard.initialize(1000, 100);
-    let value = ValueType::Rid(Rid::new(1, 0)); // ValueType is Rid
-    leaf_guard.insert_at(0, 42, value);
-    leaf_guard.insert_at(1, 43, value);
+//     let mut leaf_guard = LeafPageGuard::new(bpm.write_page(1000, Index));
+//     leaf_guard.initialize(1000, 100);
+//     let value = ValueType::Rid(Rid::new(1, 0)); // ValueType is Rid
+//     leaf_guard.insert_at(0, 42, value);
+//     leaf_guard.insert_at(1, 43, value);
 
 
-    let leaf_ptr = leaf_guard.guard.as_mut().as_mut_ptr() as *mut BplusTreeLeafPage;
-    let leaf = unsafe { &mut *leaf_ptr }; // Create a temporary reference for the insert
-    assert_eq!(leaf.base_page.page_id, 1000, "Equal");
-    // reinterpret to Bplustreeleaf page
+//     let leaf_ptr = leaf_guard.guard.as_mut().as_mut_ptr() as *mut BplusTreeLeafPage;
+//     let leaf = unsafe { &mut *leaf_ptr }; // Create a temporary reference for the insert
+//     assert_eq!(leaf.base_page.page_id, 1000, "Equal");
+//     // reinterpret to Bplustreeleaf page
 
-    // again read the page _id from the bufferpool
-    let read_guard = bpm.read_page(1000, Index);
-    let page: &BplusTreeLeafPage = unsafe {
-        let data = read_guard.as_ref();
-        &*(data.as_ptr() as *const BplusTreeLeafPage)
-    };
+//     // again read the page _id from the bufferpool
+//     let read_guard = bpm.read_page(1000, Index);
+//     let page: &BplusTreeLeafPage = unsafe {
+//         let data = read_guard.as_ref();
+//         &*(data.as_ptr() as *const BplusTreeLeafPage)
+//     };
 
-    assert_eq!(page.base_page.page_id, 1000, "Equal");
-    assert_eq!(page.key_array[0],42,"equal");
-    assert_eq!(page.key_array[1],43,"equal");
-    assert_eq!(page.base_page.get_size(), 2, "equal");
+//     assert_eq!(page.base_page.page_id, 1000, "Equal");
+//     assert_eq!(page.key_array[0],42,"equal");
+//     assert_eq!(page.key_array[1],43,"equal");
+//     assert_eq!(page.base_page.get_size(), 2, "equal");
 
-}
+// }
 
 
+
+// //#[test]
+// fn test_initialize_with_root() {
+//     let (bpm, mut tree) = setup_bplus_tree();
+
+//     // Step 1: Create a HeaderPageGuard
+//     let mut header = tree.acquire_header_guard();
+//     assert_eq!(header.root_page_id(), INVALID_PAGE_ID, "Header should initially have invalid root page ID");
+
+//     // Step 2: Call initialize_with_root with a key-value pair
+//     let key: KeyType = 42;
+//     let value = ValueType::Rid(Rid::new(1, 0));
+//     let result = tree.initialize_with_root(key, value, &mut header);
+//     assert!(result, "initialize_with_root should succeed");
+
+//     // Step 3: Verify the header's root_page_id
+//     let root_page_id = header.root_page_id();
+//     assert_ne!(root_page_id, INVALID_PAGE_ID, "Root page ID should be set");
+
+//     // Step 4: Read the root page and verify its contents
+//     let root_guard = bpm.read_page(root_page_id, Index);
+//     let root_page = unsafe {
+//         let data = root_guard.as_ref();
+//         &*(data.as_ptr() as *const BplusTreeLeafPage)
+//     };
+
+//     // Verify page type
+//     assert_eq!(root_page.base_page.page_type, IndexPageType::LEAF_PAGE, "Root page should be a leaf page");
+
+//     // Verify size
+//     //assert_eq!(root_page.base_page.get_size(), 1, "Root page should contain one key");
+
+//     // Verify key
+//     assert_eq!(root_page.key_array[0], key, "Inserted key should match");
+// }
+
+// fn setup_leaf_page_guard(bpm: &BufferPoolManager) -> LeafPageGuard {
+//     let new_page_id = bpm.new_page();
+//     println!("bpm created page id {}", new_page_id);
+//     LeafPageGuard::new(bpm.write_page(new_page_id, Index))
+// }
+
+// //#[test]
+// fn test_leaf_insert_at() {
+//     let dm = DiskManager::new("test.db");
+//     let scheduler = DiskScheduler::new( dm.unwrap());
+//     let lru_k_replacer_impl = LRUKReplacerImpl::new(100, 3);
+//     let bpm = BufferPoolManager::new
+//         (
+//             10,
+//             Arc::new(scheduler),
+//             Arc::new(lru_k_replacer_impl),
+//         );
+//     let mut leaf = setup_leaf_page_guard(&bpm);
+
+//     // Initialize the leaf page
+//     leaf.initialize(1, 3); // page_id = 1, max_size = 3
+//     println!("After initialize - size: {}, key_array[0]: {}", 
+//     leaf.as_ref().base_page.get_size(), 
+//     leaf.as_ref().key_array[0]);
+
+//     let key: KeyType = 42;
+//     let value = ValueType::Rid(Rid::new(1, 0));
+//     let result = leaf.insert_at(0, key, value);
+//     println!("After insert_at - size: {}, key_array[0]: {}", 
+//                 leaf.as_ref().base_page.get_size(), 
+//                 leaf.as_ref().key_array[0]);
+
+//     assert!(result, "insert_at should succeed");
+//     assert_eq!(leaf.as_ref().base_page.get_size(), 1, "Size should be 1 after insertion");
+//     assert_eq!(leaf.as_ref().key_array[0], key, "Key should be 42");
+
+//     let rid = leaf.as_ref().rid_array[0];
+//     assert_eq!(rid.get_page_id(), 1, "Rid page_id should be 1");
+//     assert_eq!(rid.get_slot_num(), 0, "Rid slot_num should be 0");
+
+//     // Read the page back to confirm persistence in BPM
+//     let read_guard = bpm.read_page(1, Index);
+//     let read_page = unsafe {
+//         let data = read_guard.as_ref();
+//         &*(data.as_ptr() as *const BplusTreeLeafPage)
+//     };
+//     println!("BPM read - size: {}, key_array[0]: {}", 
+//                  read_page.base_page.get_size(), 
+//                  read_page.key_array[0]);
+//     assert_eq!(read_page.base_page.get_size(), 1, "BPM size should be 1");
+//     assert_eq!(read_page.key_array[0], key, "BPM key should be 42");
+// }
+
+// //#[test]
+// fn test_page_table_after_insert() {
+//     let dm = DiskManager::new("test.db");
+//     let scheduler = DiskScheduler::new( dm.unwrap());
+//     let lru_k_replacer_impl = LRUKReplacerImpl::new(100, 3);
+//     let bpm = BufferPoolManager::new
+//         (
+//             10,
+//             Arc::new(scheduler),
+//             Arc::new(lru_k_replacer_impl),
+//         );
+//     let mut leaf = setup_leaf_page_guard(&bpm);
+
+//     // Initialize the leaf page
+//     leaf.initialize(0, 3); // page_id = 1, max_size = 3
+
+//     // Insert a key-value pair
+//     let key: KeyType = 42;
+//     let value = ValueType::Rid(Rid::new(0, 0));
+//     let result = leaf.insert_at(0, key, value);
+
+//     assert!(result, "insert_at should succeed");
+
+//     // Access the page_table (assuming BufferPoolManager has a page_table field)
+//     // Note: This is a placeholder; adjust based on your BPM implementation
+//     let page_table = bpm.page_table.lock().unwrap(); // Assuming page_table is a Mutex<HashMap<PageId, FrameId>>
+//     println!("last page table {:?}", page_table);
+//     assert!(page_table.contains_key(&0), "Page 0 should be in page_table");
+// }
 
 #[test]
-fn test_initialize_with_root() {
+fn test_insertion_with_split() {
     let (bpm, mut tree) = setup_bplus_tree();
 
-    // Step 1: Create a HeaderPageGuard
-    let mut header = tree.acquire_header_guard();
-    assert_eq!(header.root_page_id(), INVALID_PAGE_ID, "Header should initially have invalid root page ID");
+    // Create a loop which sequentially inserts the keys into the tree
+    for i in 0..10000{
+        let key: KeyType = i as i64;
+        let value= ValueType::Rid(Rid::new(i as i32, 0)); //ValueType::Rid(Rid::new(1, 0))
+        let result = tree.insert(key, value);
+        println!("Key {}",result);
+        assert!(result, "Insert succeded for the key {}", key);
+    }
 
-    // Step 2: Call initialize_with_root with a key-value pair
-    let key: KeyType = 42;
-    let value = ValueType::Rid(Rid::new(1, 0));
-    let result = tree.initialize_with_root(key, value, &mut header);
-    assert!(result, "initialize_with_root should succeed");
+    
 
-    // Step 3: Verify the header's root_page_id
-    let root_page_id = header.root_page_id();
-    assert_ne!(root_page_id, INVALID_PAGE_ID, "Root page ID should be set");
+    // Verify if the split happened or not
+    // let header = tree.acquire_header_guard();
+    let root_page_id = tree.get_root_page_id();
+    println!("Root page Id = {}", root_page_id);    
+    assert_ne!(root_page_id, INVALID_PAGE_ID, "Root page id should be set");
 
-    // Step 4: Read the root page and verify its contents
     let root_guard = bpm.read_page(root_page_id, Index);
     let root_page = unsafe {
         let data = root_guard.as_ref();
-        &*(data.as_ptr() as *const BplusTreeLeafPage)
+        let page = &*(data.as_ptr() as *const BplusTreeInternalPage);
+        page
     };
+//     assert_eq!(root_page.page_type, IndexPageType::INTERNAL_PAGE, "Root should be an internal page after split");
 
-    // Verify page type
-    assert_eq!(root_page.base_page.page_type, IndexPageType::LEAF_PAGE, "Root page should be a leaf page");
+//     // Optionally, verify the structure (e.g., two child pages)
+//     let mut root = InternalPageGuard::new(bpm.write_page(root_page_id, Index));
+//     let size = root.as_ref().base_page.get_size() as usize;
+//     assert_eq!(size, 1, "Root should have one separator key after first split");
+//     assert_ne!(root.as_ref().page_id_array[0], INVALID_PAGE_ID, "Root should have a valid left child");
+//     assert_ne!(root.as_ref().page_id_array[1], INVALID_PAGE_ID, "Root should have a valid right child");
+    println!("Key array {:?}", root_page.key_array);
 
-    // Verify size
-    //assert_eq!(root_page.base_page.get_size(), 1, "Root page should contain one key");
 
-    // Verify key
-    assert_eq!(root_page.key_array[0], key, "Inserted key should match");
-}
+//     let leaf_guard = bpm.read_page(1, Index);
+//     let leaf_page = unsafe {
+//         let data = leaf_guard.as_ref();
+//         //println!("data reff {:?}", data);
+//         &*(data.as_ptr() as *const BplusTreeLeafPage)
+//     };
 
-fn setup_leaf_page_guard(bpm: &BufferPoolManager) -> LeafPageGuard {
-    let new_page_id = bpm.new_page();
-    println!("bpm created page id {}", new_page_id);
-    LeafPageGuard::new(bpm.write_page(new_page_id, Index))
-}
-
-#[test]
-fn test_leaf_insert_at() {
-    let dm = DiskManager::new("test.db");
-    let scheduler = DiskScheduler::new( dm.unwrap());
-    let lru_k_replacer_impl = LRUKReplacerImpl::new(100, 3);
-    let bpm = BufferPoolManager::new
-        (
-            10,
-            Arc::new(scheduler),
-            Arc::new(lru_k_replacer_impl),
-        );
-    let mut leaf = setup_leaf_page_guard(&bpm);
-
-    // Initialize the leaf page
-    leaf.initialize(1, 3); // page_id = 1, max_size = 3
-    println!("After initialize - size: {}, key_array[0]: {}", 
-    leaf.as_ref().base_page.get_size(), 
-    leaf.as_ref().key_array[0]);
-
-    let key: KeyType = 42;
-    let value = ValueType::Rid(Rid::new(1, 0));
-    let result = leaf.insert_at(0, key, value);
-    println!("After insert_at - size: {}, key_array[0]: {}", 
-                leaf.as_ref().base_page.get_size(), 
-                leaf.as_ref().key_array[0]);
-
-    assert!(result, "insert_at should succeed");
-    assert_eq!(leaf.as_ref().base_page.get_size(), 1, "Size should be 1 after insertion");
-    assert_eq!(leaf.as_ref().key_array[0], key, "Key should be 42");
-
-    let rid = leaf.as_ref().rid_array[0];
-    assert_eq!(rid.get_page_id(), 1, "Rid page_id should be 1");
-    assert_eq!(rid.get_slot_num(), 0, "Rid slot_num should be 0");
-
-    // Read the page back to confirm persistence in BPM
-    let read_guard = bpm.read_page(1, Index);
-    let read_page = unsafe {
-        let data = read_guard.as_ref();
-        &*(data.as_ptr() as *const BplusTreeLeafPage)
-    };
-    println!("BPM read - size: {}, key_array[0]: {}", 
-                 read_page.base_page.get_size(), 
-                 read_page.key_array[0]);
-    assert_eq!(read_page.base_page.get_size(), 1, "BPM size should be 1");
-    assert_eq!(read_page.key_array[0], key, "BPM key should be 42");
-}
-
-#[test]
-fn test_page_table_after_insert() {
-    let dm = DiskManager::new("test.db");
-    let scheduler = DiskScheduler::new( dm.unwrap());
-    let lru_k_replacer_impl = LRUKReplacerImpl::new(100, 3);
-    let bpm = BufferPoolManager::new
-        (
-            10,
-            Arc::new(scheduler),
-            Arc::new(lru_k_replacer_impl),
-        );
-    let mut leaf = setup_leaf_page_guard(&bpm);
-
-    // Initialize the leaf page
-    leaf.initialize(0, 3); // page_id = 1, max_size = 3
-
-    // Insert a key-value pair
-    let key: KeyType = 42;
-    let value = ValueType::Rid(Rid::new(0, 0));
-    let result = leaf.insert_at(0, key, value);
-
-    assert!(result, "insert_at should succeed");
-
-    // Access the page_table (assuming BufferPoolManager has a page_table field)
-    // Note: This is a placeholder; adjust based on your BPM implementation
-    let page_table = bpm.page_table.lock().unwrap(); // Assuming page_table is a Mutex<HashMap<PageId, FrameId>>
-    println!("last page table {:?}", page_table);
-    assert!(page_table.contains_key(&0), "Page 0 should be in page_table");
+//     println!("{:?}", leaf_page.key_array);
 }

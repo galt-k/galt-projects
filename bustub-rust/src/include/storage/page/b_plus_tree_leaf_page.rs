@@ -30,4 +30,6 @@ pub trait BplusTreeLeafPageImpl {
     fn key_at(&self, index: i32) -> KeyType;
     fn to_string(&self)-> String;
     fn insert(&mut self, index: i32, key: KeyType, value: ValueType)-> bool;
+    fn is_leaf(&self) -> bool;
+    fn find_insert_position(&self, key: KeyType) -> i32;
 }

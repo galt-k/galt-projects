@@ -9,6 +9,7 @@ use crate::include::buffer::lru_k_replacer::LRUKReplacer;
 use crate::include::storage::disk::disk_scheduler::DiskRequest;
 use crate::include::storage::disk::disk_scheduler::DiskSchedulerTrait;
 use std::sync::mpsc::channel;
+use std::clone::Clone;
 
 
 //use std::alloc::Global;
@@ -16,7 +17,7 @@ pub struct BasicPageGuard {
     bpm: Arc<BufferPoolManager>,
     frame: Arc<FrameHeader>,
     frame_id: FrameId,
-    page_id: PageId,
+    pub page_id: PageId,
     is_valid: bool,
 }
 
@@ -64,6 +65,18 @@ impl Drop for BasicPageGuard {
         self.drop_guard();
     }
 }
+
+// impl Clone for BasicPageGuard {
+//     fn clone(&self) -> Self {
+//         BasicPageGuard {
+//             guard: self.guard.clone(), // Requires BasicPageGuard to implement Clone
+//             replacer: self.replacer.clone(), // Safe via Arc
+//             bpm_latch: self.bpm_latch.clone(), // Safe via Arc
+//             disk_scheduler: self.disk_scheduler.clone(), // Safe via Arc
+//             is_valid: self.is_valid, // Simple copy
+//         }
+//     }
+// }
 
 // ReadPageGuard implementation 
 pub struct ReadPageGuard {
@@ -147,7 +160,7 @@ impl Drop for ReadPageGuard {
 }
 
 pub struct WritePageGuard {
-    guard: BasicPageGuard,
+    pub guard: BasicPageGuard,
     replacer: Arc<LRUKReplacerImpl>,
     bpm_latch: Arc<Mutex<()>>,
     disk_scheduler: Arc<DiskScheduler>,
@@ -226,3 +239,17 @@ impl Drop for WritePageGuard {
         self.drop_guard();
     }
 }
+
+
+// impl Clone for WritePageGuard {
+//     fn clone(&self) -> Self {
+//         WritePageGuard {
+//             guard: self.guard.clone(), // Requires BasicPageGuard to implement Clone
+//             replacer: self.replacer.clone(), // Safe via Arc
+//             bpm_latch: self.bpm_latch.clone(), // Safe via Arc
+//             disk_scheduler: self.disk_scheduler.clone(), // Safe via Arc
+//             is_valid: self.is_valid, // Simple copy
+//         }
+//     }
+// }
+

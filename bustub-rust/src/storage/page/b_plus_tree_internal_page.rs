@@ -1,5 +1,5 @@
 use crate::include::{common::config::{IndexPageType, PageId, INVALID_PAGE_ID}, storage::page::b_plus_tree_internal_page::{BplusTreeInternalPage, BplusTreeInternalPageImpl, INTERNAL_PAGE_SLOT_CNT, KeyType}};
-use crate::include::storage::page::b_plus_tree_page::{BplusTreePage, BplusTreePageImpl};
+use crate::include::storage::page::b_plus_tree_page::{BplusTreePage, BplusTreePageImpl, BplusTreePageTrait};
 
 impl BplusTreeInternalPageImpl for BplusTreeInternalPage {
     /// Init method after creating a new internal page.
@@ -17,8 +17,7 @@ impl BplusTreeInternalPageImpl for BplusTreeInternalPage {
     fn new(max_size: i32, page_id: PageId) -> Self {
         let base_page = BplusTreePage::new(IndexPageType::INTERNAL_PAGE, 0, max_size, page_id);                 
         
-        let key_array = [1000;INTERNAL_PAGE_SLOT_CNT];
-        //let rid_array = [Rid::new(INVALID_PAGE_ID, 0); LEAF_PAGE_SLOT_CNT as usize];
+        let key_array = [-1;INTERNAL_PAGE_SLOT_CNT];
         let page_id_array = [INVALID_PAGE_ID; INTERNAL_PAGE_SLOT_CNT as usize];
         BplusTreeInternalPage {
             base_page,
@@ -31,12 +30,18 @@ impl BplusTreeInternalPageImpl for BplusTreeInternalPage {
         self.key_array[index as usize]
     }
 
-    fn value_at(&self, index: i32) -> PageId {
+    fn page_id_value_at(&self, index: i32) -> PageId {
         self.page_id_array[index as usize] // is this going to return a copy of the value?
     }
 
+
+
     fn set_key_at(&mut self, index: i32, key: KeyType) {
         self.key_array[index as usize] = key
+    }
+
+    fn set_page_id_at(&mut self, index: i32, page_id: PageId) {
+        self.page_id_array[index as usize] = page_id
     }
 
     fn value_index(&self, value: PageId) -> i32 {
@@ -65,4 +70,22 @@ impl BplusTreeInternalPageImpl for BplusTreeInternalPage {
         kstr
     }
 
+    fn is_leaf(&self) -> bool {
+        false
+    }
+
+}
+
+impl BplusTreePageTrait for BplusTreeInternalPage {
+    fn is_leaf(&self) -> bool {
+        false 
+    }    
+
+    fn max_size(&self) -> i32 {
+        self.base_page.get_max_size()
+    }
+
+    fn get_size(&self) -> i32 {
+        self.base_page.get_size()
+    }
 }
