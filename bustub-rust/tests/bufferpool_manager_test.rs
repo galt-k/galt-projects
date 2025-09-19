@@ -160,5 +160,5 @@ fn test_bplustree_index_internal_page() {
         let data_ptr = read_data.as_ptr() as *const BplusTreeInternalPage;
         &*data_ptr
     };
-    assert_eq!(read_internal.key_array, [0;INTERNAL_PAGE_SLOT_CNT], " ")
+    assert_eq!(read_internal.key_array, [-1;INTERNAL_PAGE_SLOT_CNT], " ")
 }

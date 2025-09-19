@@ -1,0 +1,26 @@
+# Ignore build scripts and Makefiles
+**/Makefile linguist-language=Ignore
+**/makefile linguist-language=Ignore
+**/CMakeLists.txt linguist-language=Ignore
+
+# Ignore documentation and text files
+**/*.md linguist-language=Ignore
+**/*.txt linguist-language=Ignore
+**/*.rst linguist-language=Ignore
+
+# Ignore shell scripts
+**/*.sh linguist-language=Ignore
+**/*.bash linguist-language=Ignore
+
+# Ignore DTrace scripts
+**/*.d linguist-language=Ignore
+
+# Ignore other configs
+**/*.yml linguist-language=Ignore
+**/*.yaml linguist-language=Ignore
+**/*.toml linguist-language=Ignore
+**/*.json linguist-language=Ignore
+
+# Optional: ignore vendor / dependency folders
+vendor/** linguist-vendored
+node_modules/** linguist-vendored
