@@ -36,3 +36,41 @@ This port aims to:
 - Provide comprehensive tests equivalent to the original grading suite
 
 ## Project Structure
+
+```text
+bustub-rust/
+├── src/
+│   ├── lib.rs              # Library entry point and public API
+│   ├── page.rs             # B+Tree page definitions (header, internal, leaf)
+│   ├── bplus_tree.rs       # Core B+Tree implementation and operations
+│   ├── iterator.rs         # Index iterator for range scans
+│   ├── concurrency.rs      # Latch/crabbing and thread-safety utilities
+│   └── utils.rs            # Helper traits, constants, and functions
+├── tests/
+│   ├── integration_tests.rs # End-to-end tests
+│   └── unit_tests.rs       # Smaller unit tests for individual components
+├── examples/               # (Optional) Example usage of the B+Tree
+├── benches/                # (Optional) Benchmarks for performance testing
+├── Cargo.toml
+├── Cargo.lock
+└── README.md               # This file
+
+
+## Building and Testing
+
+```bash
+# Clone the repository
+git clone https://github.com/galt-k/galt-projects.git
+cd galt-projects/bustub-rust
+
+# Build the project
+cargo build
+
+# Run tests
+cargo test
+
+# Run tests with output
+cargo test -- --nocapture
+
+# Run benchmarks (if available)
+cargo bench
