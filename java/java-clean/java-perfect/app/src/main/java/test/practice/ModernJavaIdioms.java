@@ -3,6 +3,7 @@ package test.practice;
 import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.util.*;
+import java.util.stream.Collectors;
 
 public class ModernJavaIdioms {
     // 1. var + diamond
@@ -61,9 +62,37 @@ public class ModernJavaIdioms {
     }
     
     static void switchDemo() {
-        System.out.println("Switch Expressions");
+        System.out.println("4.Switch Expressions");
         var today = LocalDate.now().getDayOfWeek();
         System.out.println( "Today is " + today + " -> " + switchExpressions(today) + "\n");
+    }
+
+    // Streams
+    static void streams() {
+        System.out.println("5.Streams - Most used");
+        var numbers = List.of(1,23,6,4,5,67,100);
+        // classic stream pipeline
+        var evenSquared = numbers.stream()
+                .filter(n -> n%2 == 0)
+                .map(n -> n * n)
+                .sorted((a,b)->(b-a))
+                .toList();
+        
+        System.out.println("even Squares descending: "+ evenSquared);
+
+        // groupby - 
+        var grouped = numbers.stream()
+            .collect(Collectors.groupingBy(n -> n % 3));
+        System.out.println(" Grouped by mod 3: "+ grouped);
+
+        // Collectors Joining
+        var csv = List.of("apple", "banana", "cherry")
+                .stream()
+                .map(String::toUpperCase)
+                .collect(Collectors.joining(", "));
+
+        System.out.println(" CSV: " + csv);
+        System.out.println();
     }
     
     public static void main(String[] args) {
@@ -72,6 +101,7 @@ public class ModernJavaIdioms {
         records();
         immutableCollections();
         switchDemo();
+        streams();
     }
 
 
