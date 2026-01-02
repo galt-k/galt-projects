@@ -33,6 +33,10 @@ pub trait HasId {
     fn id(&self) -> &i32;
 }
 
+pub trait Calibrate {
+    fn set_calibration(&mut self, speed_sensor: i32);
+}
+
 #[derive(Debug, Clone)]
 pub enum EngineType {
     FUEL(FUEL),
@@ -120,7 +124,13 @@ pub struct Car<T>
     where T: GetMetadata {
     id: i32,
     engine: Option<T>,
-    name: String
+    name: String,
+    calibration: Option<Calibration>
+}
+
+#[derive(Debug, Clone)]
+struct Calibration {
+    speed_senor:i32
 }
 
 // Car has a name → implements HasName
@@ -139,6 +149,24 @@ where
 {
     fn id(&self) -> &i32 {
         &self.id
+    }
+}
+
+// impl<T> Calibrate for Car<T>
+// where
+//     T: GetMetadata,
+// {
+//     fn set_calibration(&mut self, speed_senor: i32) {
+//         self.calibration.unwrap().speed_senor = speed_senor;
+//     }
+// }
+
+// BUG FIX: Added as_mut() to avoid moving self.calibration
+impl<T> Calibrate for Car<T> where T: GetMetadata {
+    fn set_calibration(&mut self, speed_senor: i32) {
+        if let Some(ref mut cal) = self.calibration {
+            cal.speed_senor = speed_senor;
+        }
     }
 }
 
@@ -332,11 +360,26 @@ where
     Arc::try_unwrap(car).unwrap()
 }
 
+// Adding Closures 
+// this method takes in a generic vehicle type and a closure
+// This method applies the calibration as mentioned in the closure. 
+// worker node doesnt know about the calibration algorithm
+// master node decides the calibration for a specific vechice/car type
+fn apply_calibration<T , A>(vehicle: &mut T, algorithm: A) 
+where T: GetMetadata  + Calibrate + Clone,
+      A: Fn(&T) -> i32 
+{
+    // Apply the algotihm on the vehicel type
+    let calibration_specifc = algorithm(vehicle);
+    vehicle.set_calibration(calibration_specifc);
+}
+
+
 
 #[tokio::main]
 async fn main() {
 
-    let car: Car<EngineType> = Car { id: 1, engine: Some(EngineType::FUEL(FUEL::PETROL)), name: "Ford Mustang".to_string()};
+    let car: Car<EngineType> = Car { id: 1, engine: Some(EngineType::FUEL(FUEL::PETROL)), name: "Ford Mustang".to_string(),  calibration: Some(Calibration {speed_senor: 0})};
     // Print the metdata
     show_metadata(&car);
     show_metadata(&car.engine.unwrap());
@@ -347,6 +390,7 @@ async fn main() {
         id: 0,
         engine: None,
         name: "Nissan Rogue".to_string(),
+        calibration: Some(Calibration {speed_senor: 0})
     };
 
     let electric_engine = EngineType::POWER(POWER::ELECTRIC);
@@ -370,5 +414,41 @@ async fn main() {
     let assembled = assemble_car(electric_engine).await;
 
     println!("Final car: {:?}", assembled);
+
+    //closure
+    // call the applycalibration
+    let mut new_car: Car<EngineType> = Car {
+        id: 1,
+        engine: Some(EngineType::FUEL(FUEL::PETROL)),
+        name: "Ford Mustang".to_string(),
+        calibration: Some(Calibration {speed_senor: 0})
+    };
+
+    println!("Calibration not yet set");
+    let quality_control_multiplier = 2.0;
+    let factory_altitude_meters = 4.0;
+    let closure = move |v:&Car<EngineType>| {
+        let engine_id = v.engine.as_ref().map(|e| e.get_id()).unwrap_or(0);
+        println!("[Logic] Processing for Vehicle ID: {}", v.id);
+        // 
+        let calc = (v.id as f32 * quality_control_multiplier) + (factory_altitude_meters / 10.0);
+        let final_sensor_value = if engine_id == 2 {
+            println!("[Logic] Electric Motor detected. Applying high-torque sync.");
+            calc * 2.0
+        } else {
+            calc
+        };
+
+        final_sensor_value as i32
+    }; 
+
+    apply_calibration(&mut new_car, closure);
+    match &new_car.calibration {
+        // 'cal' represents the Calibration struct found inside the Option
+        Some(cal) => println!("Car calibrated with Speed Sensor: {}", cal.speed_senor),
+        
+        // Handles the case where the Option is None
+        None => println!("Calibration unknown"),
+    }
 
 }
