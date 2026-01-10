@@ -8,17 +8,23 @@ fn main() {
     let f = File::open("measurements.txt").unwrap();
     let f = BufReader::new(f);
     // initializing a hashmap
-    let mut stats = HashMap::<String, (f64, f64, usize, f64)>::new();
+    let mut stats = HashMap::<Vec<u8>, (f64, f64, usize, f64)>::new();
 
-    for line in f.lines() {
+    for line in f.split(b'\n') {
         let line = line.unwrap();
-        let (station, temperature) = line.split_once(';').unwrap();
-        let temperature: f64 = temperature.parse().unwrap();
+        let mut fields = line.rsplitn(2, |c| *c == b';');
+        let temperature = fields.next().unwrap();
+        let station = fields.next().unwrap();
+        //utf8 unchecked is being used bcz, read me file specified that 
+        // input file is utf-8 encoded. 
+        let temperature: f64 = unsafe { std::str::from_utf8_unchecked(temperature) }
+            .parse()
+            .unwrap();        
         // removing the allocation of a new string
         let stats = match stats.get_mut(station) {
             Some(stats) => stats,
             None => stats
-                .entry(station.to_string())
+                .entry(station.to_vec())
                 .or_insert((f64::MAX, 0., 0, f64::MIN)),
         };
         stats.0 = stats.0.min(temperature);
@@ -27,7 +33,11 @@ fn main() {
         stats.3 = stats.3.max(temperature);
     }
     print!("{{");
-    let stats = BTreeMap::from_iter(stats);
+    let stats = BTreeMap::from_iter(
+        stats
+            .into_iter()
+            .map(|(k, v)| (unsafe {String::from_utf8_unchecked(k) }, v)),
+    );
     let mut stats = stats.into_iter().peekable();
     while let Some((station, (min, sum, count, max))) = stats.next() {
         print!("{station}={min:.1}/{:.1}/{max:.1}", sum / (count as f64));
