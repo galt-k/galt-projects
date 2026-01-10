@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap,HashMap},
+    ffi::{c_int, c_void},
     fs::File,
     os::fd::AsRawFd,
 };
@@ -10,7 +11,26 @@ fn main() {
     // initializing a hashmap
     let mut stats = HashMap::<Vec<u8>, (i16, i64, usize, i16)>::new();
 
-    for line in map.split(|c| *c == b'\n') {
+    let mut at = 0;
+    loop {
+        let rest = &map[at..];
+        let next_new_line = unsafe {
+            libc::memchr(
+                rest.as_ptr() as *const c_void,
+                b'\n' as c_int,
+                rest.len())
+        };
+
+        let line = if next_new_line.is_null() {
+            rest
+        } else {
+            // memchr always returns pointers in rest, which are valid
+            let len = unsafe {
+                (next_new_line as *const u8).offset_from(rest.as_ptr())
+            } as usize;
+            &rest[..len]
+        };
+        at += line.len() + 1;
         if line.is_empty() {
             break;
         }
