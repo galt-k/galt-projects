@@ -3,13 +3,91 @@
 
 
 use std::{
+    borrow::Borrow, //? 
     collections::{BTreeMap,HashMap},
     ffi::{c_int, c_void},
     fs::File,
-    hash::{BuildHasher, Hasher},
+    hash::{BuildHasher, Hash, Hasher},
     os::fd::AsRawFd,
     simd::{cmp::SimdPartialEq, u8x16},
 };
+
+const INLINE: usize = 16; // 16bytes long
+const LAST: usize = INLINE - 1; // last byte
+
+union StrVec{
+    inlined: [u8; INLINE],
+    // if the length high bit is set, then inlined 
+    // into pointer then len
+    // otherwise, pointer is a pointer to Vec<u8>
+    heap: (usize, *mut u8),
+}
+
+impl StrVec {
+    pub fn new(s: &[u8]) -> Self {
+        if s.len() < INLINE {
+            let mut combined = [0u8; INLINE];
+            combined[..s.len()].copy_from_slice(s);
+            combined[LAST] = s.len() as u8 + 1;
+            Self {
+                inlined: combined
+            }
+        } else {
+            let ptr = Box::into_raw(s.to_vec().into_boxed_slice());
+            Self {
+                heap: (ptr.len().to_be(), ptr as *mut u8),
+            }
+        }
+    }
+}
+
+impl Drop for StrVec {
+    fn drop(&mut self) {
+        if unsafe { self.inlined[LAST] } == 0x00 {
+            unsafe {
+                let len = usize::from_be(self.heap.0);
+                let ptr = self.heap.1;
+                let slice_ptr = std::ptr::slice_from_raw_parts_mut(ptr, len);
+                let _ = Box::from_raw(slice_ptr);
+            }
+        }
+    }
+}
+
+impl AsRef<[u8]> for StrVec {
+    fn as_ref(&self) -> &[u8] {
+        unsafe {
+            if self.inlined[LAST] != 0x00 {
+                let len = self.inlined[LAST] as usize - 1;
+                std::slice::from_raw_parts(self.inlined.as_ptr(), len)
+            } else {
+                let len = usize::from_be(self.heap.0);
+                let ptr = self.heap.1;
+                std::slice::from_raw_parts(ptr, len)                
+            } 
+        }
+    }
+}
+
+impl PartialEq for StrVec {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_ref() == other.as_ref()
+    }
+}
+
+impl Eq for StrVec {}
+
+impl Hash for StrVec {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_ref().hash(state)        
+    }
+}
+
+impl Borrow<[u8]> for StrVec {
+    fn borrow(&self) -> &[u8] {
+        self.as_ref()
+    }
+}
 
 const SEMI: u8x16 = u8x16::splat(b';');
 
@@ -44,8 +122,8 @@ fn main() {
     let f = File::open("measurements.txt").unwrap();
     let map = mmap(&f);
     // initializing a hashmap
-    let mut stats = HashMap::<Vec<u8>, (i16, i64, usize, i16),_>::with_capacity_and_hasher(
-        100_000,
+    let mut stats = HashMap::<StrVec, (i16, i64, usize, i16),_>::with_capacity_and_hasher(
+        1_000,
         FastHasherBuilder,
     );
 
@@ -61,7 +139,7 @@ fn main() {
         let stats = match stats.get_mut(station) {
             Some(stats) => stats,
             None => stats
-                .entry(station.to_vec())
+                .entry(StrVec::new(station))
                 .or_insert((i16::MAX, 0, 0, i16::MIN)),
         };
         stats.0 = stats.0.min(t);
@@ -71,9 +149,8 @@ fn main() {
     }
     print!("{{");
     let stats = BTreeMap::from_iter(
-        stats
-            .into_iter()
-            .map(|(k, v)| (unsafe {String::from_utf8_unchecked(k) }, v)),
+        stats.iter()
+            .map(|(k, v)| (unsafe {std::str::from_utf8_unchecked(k.as_ref()) }, *v)),
     );
     let mut stats = stats.into_iter().peekable();
     while let Some((station, (min, sum, count, max))) = stats.next() {
