@@ -90,6 +90,7 @@ impl Borrow<[u8]> for StrVec {
 }
 
 const SEMI: u8x16 = u8x16::splat(b';');
+const NEWL: u8x16 = u8x16::splat(b'\n');
 
 struct FastHasherBuilder;
 struct FastHasher(u64);
@@ -139,11 +140,11 @@ fn main() {
     );
 
     let mut at = 0;
-    loop {
-        let line = next_line(map, &mut at);
-        if line.is_empty() {
-            break;
-        }
+    while at < map.len() 
+    {
+        let newline_at = at + next_newline(map, at);
+        let line = &map[at..newline_at];
+        at = newline_at + 1;
         let (station, temperature) = split_semi(line);
         
         let t = parse_temperature(temperature);
@@ -179,26 +180,27 @@ fn main() {
 //Instead of reading file into a buffer, mmap tells the O.S to make file's bytes appear as if 
 // they are already in memory
 #[inline]
-fn next_line<'a>(map: &'a [u8], at: &mut usize) -> &'a [u8] {
-    let rest = &map[*at..];
-    let next_new_line = unsafe {
-        libc::memchr(
-            rest.as_ptr() as *const c_void,
-            b'\n' as c_int,
-            rest.len())
-    };
-
-    if next_new_line.is_null() {
-        *at += rest.len();
-        rest
+fn next_newline(map: &[u8], at: usize) -> usize {
+    let rest = &map[at..];
+    let newline_eq = NEWL.simd_eq(u8x16::load_or_default(rest));
+    if let Some(i) = newline_eq.first_set(){
+        i
     } else {
-        // memchr always returns pointers in rest, which are valid
+        let restrest = &rest[64..];
+        let next_newline = unsafe {
+            libc::memchr(
+                restrest.as_ptr() as *const c_void,
+                b'\n' as c_int,
+                restrest.len(),                
+            )
+        };
+        assert!(!next_newline.is_null());
         let len = unsafe {
-            (next_new_line as *const u8).offset_from(rest.as_ptr())
+            (next_newline as *const u8).offset_from(restrest.as_ptr())
         } as usize;
-        *at += len + 1;
-        &rest[..len]
+        64 + len
     }
+    
 }
 
 
