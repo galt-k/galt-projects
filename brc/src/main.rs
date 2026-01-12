@@ -1,6 +1,8 @@
 #![feature(portable_simd)]
 #![feature(slice_split_once)]
 #![feature(hasher_prefixfree_extras)]
+#![feature(ptr_cast_array)]
+
 
 use std::{
     borrow::Borrow, //? 
@@ -179,14 +181,23 @@ fn main() {
 }
 //Instead of reading file into a buffer, mmap tells the O.S to make file's bytes appear as if 
 // they are already in memory
-#[inline]
+
 fn next_newline(map: &[u8], at: usize) -> usize {
-    let rest = &map[at..];
-    let newline_eq = NEWL.simd_eq(u8x16::load_or_default(rest));
+    let rest = unsafe { map.get_unchecked(at..) };
+    let against = if let Some((restu8x16,_)) = rest.split_first_chunk::<16>() {
+        u8x16::from_array(*restu8x16)
+    } else {
+        u8x16::load_or_default(rest)
+    };
+
+    let newline_eq = NEWL.simd_eq(against);
+    
     if let Some(i) = newline_eq.first_set(){
         i
     } else {
-        let restrest = &rest[64..];
+        let restrest = unsafe {
+            rest.get_unchecked(64..)
+        };
         let next_newline = unsafe {
             libc::memchr(
                 restrest.as_ptr() as *const c_void,
