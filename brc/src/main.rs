@@ -277,24 +277,42 @@ fn split_semi(line: &[u8]) -> (&[u8], &[u8]) {
 //     }
 // }
 
-fn parse_temperature(temperature: &[u8])-> i16 {
-    let mut t : i16 = 0;
-    let mut mul = 1;
-    for &d in temperature.iter().rev() {
-        match d {
-            b'.' => {
-                continue;
-            }
-            b'-' => {
-                t = -t;
-                break;
-            }
-            _ => {
-                t += i16::from(d - b'0') * mul;
-                mul *= 10;
-            }
-        }
+fn parse_temperature(t: &[u8])-> i16 {
+    
+    let tlen = t.len();
+    assert!(tlen >= 3);
+    let sign = i16::from(t[0] != b'-') * 2 - 1;
+    let skip = if t[0] == b'-' { 1 } else { 0 };
+    let mul = if tlen - skip == 4 { 100 } else { 10 };
+    let t1 = mul * i16::from(t[skip] - b'0');
+    let t2 = if mul == 10 { 0 } else { 1 } * 10 * i16::from(t[tlen - 3] - b'0');
+    let t3 = i16::from(t[tlen - 1] - b'0');
+    sign * (t1 + t2 + t3)
 
-    }
-    t
 }
+    
+    
+    
+    
+    
+    
+//     let mut t : i16 = 0;
+//     let mut mul = 1;
+//     for &d in temperature.iter().rev() {
+//         match d {
+//             b'.' => {
+//                 continue;
+//             }
+//             b'-' => {
+//                 t = -t;
+//                 break;
+//             }
+//             _ => {
+//                 t += i16::from(d - b'0') * mul;
+//                 mul *= 10;
+//             }
+//         }
+
+//     }
+//     t
+// }
