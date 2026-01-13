@@ -6,12 +6,12 @@
 
 use std::{
     borrow::Borrow, //? 
-    collections::{BTreeMap,HashMap},
+    collections::{BTreeMap, HashMap, btree_map::Entry},
     ffi::{c_int, c_void},
     fs::File,
     hash::{BuildHasher, Hash, Hasher},
     os::fd::AsRawFd,
-    simd::{cmp::SimdPartialEq, u8x16},
+    simd::{cmp::SimdPartialEq, u8x64, u8x16},
 };
 
 const INLINE: usize = 16; // 16bytes long
@@ -24,6 +24,7 @@ union StrVec{
     // otherwise, pointer is a pointer to Vec<u8>
     heap: (usize, *mut u8),
 }
+unsafe impl Send for StrVec {} 
 
 impl StrVec {
     pub fn new(s: &[u8]) -> Self {
@@ -91,8 +92,8 @@ impl Borrow<[u8]> for StrVec {
     }
 }
 
-const SEMI: u8x16 = u8x16::splat(b';');
-const NEWL: u8x16 = u8x16::splat(b'\n');
+const SEMI: u8x64 = u8x64::splat(b';');
+const NEWL: u8x64 = u8x64::splat(b'\n');
 
 struct FastHasherBuilder;
 struct FastHasher(u64);
@@ -134,33 +135,50 @@ impl Hasher for FastHasher {
 
 fn main() {
     let f = File::open("measurements.txt").unwrap();
-    let map = mmap(&f);
-    // initializing a hashmap
-    let mut stats = HashMap::<StrVec, (i16, i64, usize, i16),_>::with_capacity_and_hasher(
-        1_000,
-        FastHasherBuilder,
-    );
+    let mut stats = BTreeMap::new();
+    std::thread::scope(|scope| {
+        let map = mmap(&f);
+        let nthreads = std::thread::available_parallelism().unwrap();
+        let mut at = 0;
+        let (tx, rx) = std::sync::mpsc::sync_channel(nthreads.get());
+        let chunk_size = map.len() / nthreads;
+        for _ in 0..nthreads.get() {
+            let start = at; 
+            let end = (at + chunk_size).min(map.len());
+            let end = if end == map.len() {
+                map.len()
+            } else {
+                let newline_at = next_newline(&map[end..], 0);
+                end + newline_at + 1
+            };
 
-    let mut at = 0;
-    while at < map.len() 
-    {
-        let newline_at = at + next_newline(map, at);
-        let line = &map[at..newline_at];
-        at = newline_at + 1;
-        let (station, temperature) = split_semi(line);
-        
-        let t = parse_temperature(temperature);
-        let stats = match stats.get_mut(station) {
-            Some(stats) => stats,
-            None => stats
-                .entry(StrVec::new(station))
-                .or_insert((i16::MAX, 0, 0, i16::MIN)),
-        };
-        stats.0 = stats.0.min(t);
-        stats.1 += i64::from(t);
-        stats.2 += 1;
-        stats.3 = stats.3.max(t);
-    }
+            let map = &map[start..end];
+            at = end;
+            let tx = tx.clone();
+            scope.spawn(move || tx.send(one(map)));
+        }
+
+        drop(tx);
+        for one_stat in rx {
+            for (k,v) in one_stat {
+                match stats.entry(unsafe {
+                    String::from_utf8_unchecked(k.as_ref().to_vec()) }) {
+                    Entry::Vacant(none) => {
+                        none.insert(v);
+                    }
+                    Entry::Occupied(some) => {
+                        let stat = some.into_mut();
+                        stat.0 = stat.0.min(v.0);
+                        stat.1 += v.1;
+                        stat.2 += v.2;
+                        stat.3 = stat.3.max(v.3);
+                    }
+
+                }
+            }
+        }
+    });
+
     print!("{{");
     let stats = BTreeMap::from_iter(
         stats.iter()
@@ -181,13 +199,35 @@ fn main() {
 }
 //Instead of reading file into a buffer, mmap tells the O.S to make file's bytes appear as if 
 // they are already in memory
+fn one(map: &[u8]) -> HashMap<StrVec, (i16, i64, usize, i16), FastHasherBuilder> {
+    let mut stats = HashMap::with_capacity_and_hasher(1_000, FastHasherBuilder);
+    let mut at = 0;
+    while at < map.len() {
+        let newline_at = at + next_newline(map, at);
+        let line = &map[at..newline_at];
+        at = newline_at + 1;
+        let (station, temperature) = split_semi(line);
+        let t = parse_temperature(temperature);
+        let stats = match stats.get_mut(station) {
+            Some(stats) => stats,
+            None => stats
+                .entry(StrVec::new(station))
+                .or_insert((i16::MAX, 0, 0, i16::MIN)),
+        };
+        stats.0 = stats.0.min(t);
+        stats.1 += i64::from(t);
+        stats.2 += 1;
+        stats.3 = stats.3.max(t);
+    }
+    stats
+}
 
 fn next_newline(map: &[u8], at: usize) -> usize {
     let rest = unsafe { map.get_unchecked(at..) };
-    let against = if let Some((restu8x16,_)) = rest.split_first_chunk::<16>() {
-        u8x16::from_array(*restu8x16)
+    let against = if let Some((restu8x64, _)) = rest.split_first_chunk::<64>() {
+        u8x64::from_array(*restu8x64)
     } else {
-        u8x16::load_or_default(rest)
+        u8x64::load_or_default(rest)
     };
 
     let newline_eq = NEWL.simd_eq(against);
@@ -242,28 +282,24 @@ fn mmap(f: &File) -> &'_ [u8] {
     }
 }
 
-#[inline(always)]
 fn split_semi(line: &[u8]) -> (&[u8], &[u8]) {
-    let len = line.len();
-    
-    // If the line is at least 16 bytes, we do a "Naked Load"
-    // This avoids the 36-second 'load_select_ptr' bottleneck from your trace.
-    if len >= 16 {
-        let chunk = unsafe {
-            // SAFETY: We are reading 16 bytes from a valid mmap slice.
-            u8x16::from_slice(std::slice::from_raw_parts(line.as_ptr(), 16))
+    // Station names are rarely > 16 bytes. Let's use u8x16 for a faster "Naked Load"
+    // even though our constants are u8x64.
+    if line.len() >= 16 {
+        let chunk = unsafe { 
+            std::ptr::read_unaligned(line.as_ptr() as *const u8x16) 
         };
-        let mask = chunk.simd_eq(SEMI).to_bitmask();
+        let semi_16 = u8x16::splat(b';');
+        let mask = chunk.simd_eq(semi_16).to_bitmask();
         
         if mask != 0 {
             let index = mask.trailing_zeros() as usize;
             return (&line[..index], &line[index + 1..]);
         }
     }
-
-    // Fallback for lines < 16 bytes OR if ';' wasn't in the first 16 bytes.
-    // This uses the optimized assembly inside the standard library.
-    line.split_once(|&b| b == b';').unwrap()
+    
+    // Fallback to the standard library's optimized search
+    line.split_once(|&c| c == b';').expect("Semicolon missing")
 }
 // fn split_semi(line: &[u8]) -> (&[u8], &[u8]) {
 //     // line is at most 106B -> 100 + 1 + 5
