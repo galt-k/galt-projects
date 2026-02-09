@@ -4,6 +4,7 @@ import com.rev.triage.paymentservice.dto.PaymentRequest;
 import com.rev.triage.paymentservice.dto.PaymentResponse;
 import com.rev.triage.paymentservice.entity.Payment;
 import com.rev.triage.paymentservice.repository.PaymentRepository;
+import io.micrometer.observation.annotation.Observed;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -20,6 +21,8 @@ public class PaymentService {
         this.paymentRepository = paymentRepository;
     }
 
+    @Observed(name = "payment.process", contextualName = "process-payment",
+              lowCardinalityKeyValues = {"payment.operation", "process"})
     public PaymentResponse processPayment(PaymentRequest request) {
         log.info("Processing payment for order {} amount {}", request.orderId(), request.amount());
 

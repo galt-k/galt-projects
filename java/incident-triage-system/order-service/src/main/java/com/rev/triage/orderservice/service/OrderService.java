@@ -6,6 +6,7 @@ import com.rev.triage.orderservice.dto.*;
 import com.rev.triage.orderservice.entity.Order;
 import com.rev.triage.orderservice.entity.OrderItem;
 import com.rev.triage.orderservice.repository.OrderRepository;
+import io.micrometer.observation.annotation.Observed;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -31,6 +32,8 @@ public class OrderService {
         this.paymentClient = paymentClient;
     }
 
+    @Observed(name = "order.create", contextualName = "create-order",
+              lowCardinalityKeyValues = {"order.operation", "create"})
     @Transactional
     public OrderResponse createOrder(CreateOrderRequest request) {
         log.info("Creating order with {} items", request.items().size());
@@ -40,9 +43,33 @@ public class OrderService {
         order.setTotalAmount(BigDecimal.ZERO);
         order.setCreatedAt(LocalDateTime.now());
 
+        BigDecimal total = validateAndBuildItems(request, order);
+
+        order.setTotalAmount(total);
+        order.setStatus(Order.OrderStatus.PAYMENT_PENDING);
+        Order savedOrder = orderRepository.save(order);
+
+        // Call payment-service (generates another HTTP span)
+        log.info("Order {} saved, requesting payment of {}", savedOrder.getId(), total);
+        PaymentResponse payment = paymentClient.processPayment(
+                new PaymentRequest(savedOrder.getId(), total));
+
+        // Update order with payment result
+        savedOrder.setPaymentId(payment.id());
+        savedOrder.setStatus("COMPLETED".equals(payment.status())
+                ? Order.OrderStatus.COMPLETED
+                : Order.OrderStatus.FAILED);
+        orderRepository.save(savedOrder);
+
+        log.info("Order {} completed with payment {}", savedOrder.getId(), payment.id());
+        return toResponse(savedOrder);
+    }
+
+    @Observed(name = "order.validateItems", contextualName = "validate-order-items",
+              lowCardinalityKeyValues = {"order.operation", "validate"})
+    public BigDecimal validateAndBuildItems(CreateOrderRequest request, Order order) {
         BigDecimal total = BigDecimal.ZERO;
 
-        // Validate each product by calling product-service (generates HTTP spans)
         for (CreateOrderRequest.OrderItemRequest itemReq : request.items()) {
             ProductResponse product = productClient.getProduct(itemReq.productId());
 
@@ -64,24 +91,7 @@ public class OrderService {
             total = total.add(product.price().multiply(BigDecimal.valueOf(itemReq.quantity())));
         }
 
-        order.setTotalAmount(total);
-        order.setStatus(Order.OrderStatus.PAYMENT_PENDING);
-        Order savedOrder = orderRepository.save(order);
-
-        // Call payment-service (generates another HTTP span)
-        log.info("Order {} saved, requesting payment of {}", savedOrder.getId(), total);
-        PaymentResponse payment = paymentClient.processPayment(
-                new PaymentRequest(savedOrder.getId(), total));
-
-        // Update order with payment result
-        savedOrder.setPaymentId(payment.id());
-        savedOrder.setStatus("COMPLETED".equals(payment.status())
-                ? Order.OrderStatus.COMPLETED
-                : Order.OrderStatus.FAILED);
-        orderRepository.save(savedOrder);
-
-        log.info("Order {} completed with payment {}", savedOrder.getId(), payment.id());
-        return toResponse(savedOrder);
+        return total;
     }
 
     private OrderResponse toResponse(Order order) {
