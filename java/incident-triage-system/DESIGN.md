@@ -9,54 +9,77 @@ processing payments. All telemetry is exported via OTLP to Jaeger for trace visu
 ## 2. High-Level Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                        DEPLOYMENT ENVIRONMENT                            │
-│                   (Docker Compose / Kubernetes)                          │
-│                                                                          │
-│  ┌─────────┐    POST /orders     ┌──────────────────┐                    │
-│  │  Client │ ──────────────────▶ │   order-service  │                    │
-│  │  (curl) │                     │     :8082        │                    │
-│  └─────────┘                     └────┬──────────┬──┘                    │
-│                                       │          │                       │
-│                    GET /products/{id} │          │ POST /payments        │
-│                                       ▼          ▼                       │
-│                          ┌────────────────┐  ┌────────────────┐          │
-│                          │product-service │  │payment-service │          │
-│                          │    :8081       │  │    :8083       │          │
-│                          └───────┬────────┘  └───────┬────────┘          │ 
-│                                  │                   │                   │
-│                             ┌────┴────┐         ┌────┴────┐              │
-│                             │ H2 (mem)│         │ H2 (mem)│              │
-│                             └─────────┘         └─────────┘              │
-│                                                                          │
-│  ┌─────────────── TELEMETRY PIPELINE ──────────────────┐                 │
-│  │                                                     │                 │
-│  │  All services ──── OTLP/HTTP ────▶ ┌──────────────┐ │                 │
-│  │  (port 4318)                       │   Jaeger     │ │                 │
-│  │                                    │   :16686 UI  │ │                 │
-│  │  @Observed spans ─┐                │   :4318 OTLP │ │                 │
-│  │  HTTP auto-spans ─┤── traceparent  └──────────────┘ │                 │
-│  │  Log correlation ─┘   propagation                   │                 │
-│  └─────────────────────────────────────────────────────┘                 │
-└──────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                          DEPLOYMENT ENVIRONMENT                              │
+│                     (Docker Compose / Kubernetes)                            │
+│                                                                              │
+│  ┌─────────┐    POST /orders     ┌──────────────────┐                        │
+│  │  Client │ ──────────────────▶ │   order-service  │                        │
+│  │  (curl) │                     │     :8082        │                        │
+│  └────┬────┘                     └────┬──────────┬──┘                        │
+│       │                               │          │                           │
+│       │        GET /products/{id}     │          │ POST /payments            │
+│       │                               ▼          ▼                           │
+│       │                  ┌────────────────┐  ┌────────────────┐              │
+│       │                  │product-service │  │payment-service │              │
+│       │                  │    :8081       │  │    :8083       │              │
+│       │                  └───────┬────────┘  └───────┬────────┘              │
+│       │                         │                    │                       │
+│       │                    ┌────┴────┐          ┌────┴────┐                  │
+│       │                    │ H2 (mem)│          │ H2 (mem)│                  │
+│       │                    └─────────┘          └─────────┘                  │
+│       │                                                                      │
+│       │  POST /ask         ┌──────────────────────────────────┐              │
+│       └──────────────────▶ │         rag-service              │              │
+│          POST /ingest      │           :8084                  │              │
+│                            │                                  │              │
+│                            │  ┌─────────┐    ┌─────────────┐  │              │
+│                            │  │ Ingest  │    │  RAG Query  │  │              │
+│                            │  │ Service │    │   Service   │  │              │
+│                            │  └────┬────┘    └──┬──────┬───┘  │              │
+│                            │       │            │      │      │              │
+│                            └───────┼────────────┼──────┼──────┘              │
+│                                    │            │      │                     │
+│                              embed │    retrieve│  chat│                     │
+│                                    ▼            ▼      ▼                     │
+│                            ┌────────────┐  ┌──────────────┐                  │
+│                            │  ChromaDB  │  │    Ollama    │                  │
+│                            │   :8000    │  │   :11434     │                  │
+│                            │  (vector)  │  │  (LLM+Embed) │                  │
+│                            └────────────┘  └──────────────┘                  │
+│                                                                              │
+│  ┌──────────────── TELEMETRY PIPELINE ───────────────────┐                   │
+│  │                                                       │                   │
+│  │  All services ──── OTLP/HTTP ────▶ ┌──────────────┐   │                   │
+│  │  (port 4318)                       │   Jaeger     │   │                   │
+│  │                                    │   :16686 UI  │   │                   │
+│  │  @Observed spans ─┐                │   :4318 OTLP │   │                   │
+│  │  HTTP auto-spans ─┤── traceparent  └──────────────┘   │                   │
+│  │  Log correlation ─┘   propagation                     │                   │
+│  └───────────────────────────────────────────────────────┘                   │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## 3. Tech Stack
 
-| Component        | Technology                                |
-|------------------|-------------------------------------------|
-| Framework        | Spring Boot 3.5.10                        |
-| Language         | Java 21                                   |
-| Build Tool       | Maven (multi-module aggregator)           |
-| Database         | H2 in-memory (per service)                |
-| ORM              | Spring Data JPA / Hibernate               |
-| HTTP Client      | Spring RestClient (Spring 6.1+)           |
-| Tracing Bridge   | Micrometer Tracing + OpenTelemetry bridge |
-| Custom Spans     | `@Observed` (Micrometer Observation API)  |
-| Trace Export     | OTLP HTTP Exporter → Jaeger               |
-| Containerization | Docker + Docker Compose                   |
-| Orchestration    | Kubernetes (Minikube for local)           |
-| Trace Backend    | Jaeger 2.4 (all-in-one)                   |
+| Component        | Technology                                 |
+|------------------|--------------------------------------------|
+| Framework        | Spring Boot 3.5.10                         |
+| Language         | Java 21                                    |
+| Build Tool       | Maven (multi-module aggregator)            |
+| Database         | H2 in-memory (per service)                 |
+| ORM              | Spring Data JPA / Hibernate                |
+| HTTP Client      | Spring RestClient (Spring 6.1+)            |
+| Tracing Bridge   | Micrometer Tracing + OpenTelemetry bridge  |
+| Custom Spans     | `@Observed` (Micrometer Observation API)   |
+| Trace Export     | OTLP HTTP Exporter → Jaeger                |
+| Containerization | Docker + Docker Compose                    |
+| Orchestration    | Kubernetes (Minikube for local)            |
+| Trace Backend    | Jaeger 2.4 (all-in-one)                    |
+| RAG Framework    | LangChain4j 1.11.0                         |
+| LLM (local)     | Ollama (llama3.2 chat + nomic-embed-text)  |
+| Vector Store     | ChromaDB                                   |
+| Doc Parsing      | Apache Tika (via LangChain4j)              |
 
 ## 4. Project Structure
 
@@ -124,11 +147,31 @@ incident-triage-system/
 │       └── resources/
 │           └── application.yml
 │
+├── rag-service/
+│   ├── pom.xml                                    # LangChain4j BOM 1.11.0
+│   ├── Dockerfile
+│   └── src/main/
+│       ├── java/com/rev/triage/ragservice/
+│       │   ├── RagServiceApplication.java
+│       │   ├── config/RagConfig.java              # ChromaDB + ContentRetriever beans
+│       │   ├── service/IngestionService.java      # Doc loading, chunking, embedding
+│       │   ├── service/RagQueryService.java       # RAG query (retrieve + LLM chat)
+│       │   ├── controller/RagController.java      # /ask, /ingest, /health
+│       │   └── dto/
+│       │       ├── AskRequest.java
+│       │       └── AskResponse.java
+│       └── resources/
+│           ├── application.yml
+│           └── docs/                              # Embedded documents
+│               ├── DESIGN.md
+│               └── TRACING_THOUGHT_PROCESS.md
+│
 └── k8s/                               # Kubernetes manifests
     ├── jaeger.yml                     # Jaeger Deployment + Service
     ├── product-service.yml            # Deployment + Service + health probes
     ├── order-service.yml              # Deployment + Service + health probes
-    └── payment-service.yml            # Deployment + Service + health probes
+    ├── payment-service.yml            # Deployment + Service + health probes
+    └── rag-service.yml               # Deployment + Service (1Gi memory)
 ```
 
 ## 5. Service Details
@@ -257,6 +300,91 @@ incident-triage-system/
 | :--- | :--- | :--- |
 | `payment.process` | `process-payment` | Wraps payment processing (incl. 150ms sim) |
 
+### 5.4 rag-service (Port 8084)
+
+**Purpose:** RAG (Retrieval-Augmented Generation) pipeline — ingests project documentation into a vector store, then
+answers natural language questions by retrieving relevant chunks and passing them to a local LLM.
+
+**Endpoints:**
+
+| Method | Path      | Description                             |
+| :----- | :-------- | :-------------------------------------- |
+| POST   | `/ask`    | Ask a question about the system         |
+| POST   | `/ingest` | Trigger document ingestion into ChromaDB |
+| GET    | `/health` | Health check                            |
+
+**RAG Pipeline Flow:**
+
+```
+                    POST /ingest                        POST /ask
+                        │                                   │
+                        ▼                                   ▼
+              ┌─────────────────┐                ┌─────────────────────┐
+              │ IngestionService│                │  RagQueryService    │
+              │                 │                │                     │
+              │ 1. Load .md     │                │ 1. Retrieve chunks  │
+              │    from docs/   │                │    from ChromaDB    │
+              │ 2. Chunk (1000  │                │ 2. Build prompt     │
+              │    chars, 200   │                │    with context     │
+              │    overlap)     │                │ 3. Send to Ollama   │
+              │ 3. Embed via    │                │    (llama3.2)       │
+              │    Ollama       │                │ 4. Return answer    │
+              │ 4. Store in     │                │                     │
+              │    ChromaDB     │                └──────┬──────┬───────┘
+              └───────┬─────┬── ┘                       │      │
+                      │     │                   retrieve│  chat│
+                 embed│     │store                      │      │
+                      ▼     ▼                           ▼      ▼
+              ┌──────────┐ ┌──────────┐        ┌──────────┐ ┌────────┐
+              │  Ollama  │ │ ChromaDB │        │ ChromaDB │ │ Ollama │
+              │(nomic-   │ │          │        │          │ │(llama  │
+              │embed-text│ │          │        │          │ │ 3.2)   │
+              └──────────┘ └──────────┘        └──────────┘ └────────┘
+```
+
+**Dependencies (LangChain4j BOM 1.11.0):**
+
+| Artifact                                 | Purpose                                |
+| :--------------------------------------- | :------------------------------------- |
+| `langchain4j`                            | Core RAG abstractions                  |
+| `langchain4j-ollama-spring-boot-starter` | Auto-configures Ollama chat + embedding|
+| `langchain4j-chroma`                     | ChromaDB vector store integration      |
+| `langchain4j-document-parser-apache-tika`| Document parsing (Markdown, PDF, etc.) |
+
+**Chunking Strategy:**
+
+- Splitter: `DocumentSplitters.recursive(1000, 200)`
+- Chunk size: 1000 characters
+- Overlap: 200 characters (prevents losing context at chunk boundaries)
+- Retrieval: Top 5 results with minimum score 0.5
+
+**Ollama Models:**
+
+| Model            | Purpose    | Size   |
+| :--------------- | :--------- | :----- |
+| `llama3.2`       | Chat / QA  | ~2GB   |
+| `nomic-embed-text` | Embeddings | ~274MB |
+
+**Request Body (`POST /ask`):**
+
+```json
+{
+  "question": "How does trace propagation work between services?"
+}
+```
+
+**Response:**
+
+```json
+{
+  "answer": "Trace propagation works via the W3C traceparent header...",
+  "question": "How does trace propagation work between services?"
+}
+```
+
+**Documents Ingested:** The project's own `DESIGN.md` and `TRACING_THOUGHT_PROCESS.md` — so you can ask the
+RAG system questions about the system it's part of.
+
 ## 6. Inter-Service Communication
 
 ### 6.1 HTTP Client: Spring RestClient
@@ -321,7 +449,7 @@ microservices practice).
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                   INSTRUMENTATION STACK                       │
+│                   INSTRUMENTATION STACK                      │
 │                                                              │
 │  Layer 1: AUTO — HTTP Server Spans                           │
 │  ┌────────────────────────────────────────────────────┐      │
@@ -455,14 +583,16 @@ ENTRYPOINT ["java", "-jar", "app.jar"]
 
 ### 8.2 Docker Compose
 
-`docker-compose.yml` runs all 4 containers:
+`docker-compose.yml` runs all 6 containers:
 
-| Container       | Image                    | Ports       | Purpose            |
-|-----------------|--------------------------|-------------|--------------------|
-| jaeger          | jaegertracing/jaeger:2.4 | 16686, 4318 | Trace backend      |
-| product-service | (built from Dockerfile)  | 8081        | Product catalog    |
-| order-service   | (built from Dockerfile)  | 8082        | Order orchestrator |
-| payment-service | (built from Dockerfile)  | 8083        | Payment processor  |
+| Container       | Image                    | Ports       | Purpose                  |
+|-----------------|--------------------------|-------------|--------------------------|
+| jaeger          | jaegertracing/jaeger:2.4 | 16686, 4318 | Trace backend            |
+| chromadb        | chromadb/chroma:latest   | 8000        | Vector store for RAG     |
+| product-service | (built from Dockerfile)  | 8081        | Product catalog          |
+| order-service   | (built from Dockerfile)  | 8082        | Order orchestrator       |
+| payment-service | (built from Dockerfile)  | 8083        | Payment processor        |
+| rag-service     | (built from Dockerfile)  | 8084        | RAG pipeline (LLM + VDB) |
 
 **Key docker-compose design choices:**
 
@@ -488,6 +618,23 @@ Minimal K8s manifests in `k8s/` folder. Each service gets:
 
 ## 9. Running the System
 
+### 9.0 Prerequisites — Ollama Setup (for rag-service)
+
+```bash
+# Install Ollama (macOS)
+brew install ollama
+
+# Start Ollama server
+ollama serve
+
+# Pull required models (in another terminal)
+ollama pull llama3.2            # Chat model (~2GB)
+ollama pull nomic-embed-text    # Embedding model (~274MB)
+
+# Verify models are available
+ollama list
+```
+
 ### 9.1 Local (bare metal)
 
 ```bash
@@ -501,10 +648,17 @@ docker run -d --name jaeger -p 16686:16686 -p 4318:4318 \
   jaegertracing/jaeger:2.4 \
   --set receivers.otlp.protocols.http.endpoint=0.0.0.0:4318
 
-# Start services (3 terminals)
+# Start ChromaDB (for vector store)
+docker run -d --name chromadb -p 8000:8000 chromadb/chroma:latest
+
+# Start Ollama (if not already running)
+ollama serve &
+
+# Start services (4 terminals)
 java -jar product-service/target/product-service-0.0.1-SNAPSHOT.jar
 java -jar order-service/target/order-service-0.0.1-SNAPSHOT.jar
 java -jar payment-service/target/payment-service-0.0.1-SNAPSHOT.jar
+java -jar rag-service/target/rag-service-0.0.1-SNAPSHOT.jar
 ```
 
 ### 9.2 Docker Compose
@@ -534,16 +688,19 @@ mvn clean package -DskipTests
 docker build -t product-service:latest product-service/
 docker build -t order-service:latest order-service/
 docker build -t payment-service:latest payment-service/
+docker build -t rag-service:latest rag-service/
 
 # Deploy
 kubectl apply -f k8s/jaeger.yml
 kubectl apply -f k8s/product-service.yml
 kubectl apply -f k8s/order-service.yml
 kubectl apply -f k8s/payment-service.yml
+kubectl apply -f k8s/rag-service.yml
 
 # Access
 kubectl port-forward svc/jaeger 16686:16686      # Jaeger UI
 kubectl port-forward svc/order-service 8082:8082  # Order API
+kubectl port-forward svc/rag-service 8084:8084    # RAG API
 ```
 
 ### 9.4 Test Commands
@@ -559,6 +716,24 @@ curl -X POST http://localhost:8082/orders \
 
 # View traces
 open http://localhost:16686    # Jaeger UI
+
+# --- RAG Service ---
+
+# Ingest project documents into ChromaDB
+curl -X POST http://localhost:8084/ingest
+
+# Ask a question about the system
+curl -X POST http://localhost:8084/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question":"How does distributed tracing work in this system?"}'
+
+# Ask about a specific design decision
+curl -X POST http://localhost:8084/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question":"Why did we choose RestClient over RestTemplate?"}'
+
+# Health check
+curl http://localhost:8084/health
 ```
 
 ## 10. Design Decisions
@@ -581,9 +756,24 @@ open http://localhost:16686    # Jaeger UI
 | Health probes on /actuator/health         | Spring Boot Actuator provides this for free; K8s uses it for pod lifecycle        |
 | Hardcoded URLs + env var overrides        | Simple default for local; overridden in Docker/K8s via env vars                   |
 | No OTel Collector (yet)                   | Direct app → Jaeger export is simpler for learning; Collector adds a hop          |
+| LangChain4j over Spring AI                | More mature RAG abstractions (ingestor, splitters, retrievers); BOM-managed deps  |
+| Ollama over OpenAI                        | Free, runs locally, no API key needed — ideal for learning                        |
+| llama3.2 for chat                         | Lightweight (2GB), fast enough for local dev, good reasoning capability           |
+| nomic-embed-text for embeddings           | Small (~274MB), good quality, Ollama-native                                       |
+| ChromaDB over Weaviate/Pinecone           | Simplest setup (single Docker container), no auth, good for prototyping           |
+| Recursive splitter (1000/200)             | 1000-char chunks balance context vs. precision; 200-char overlap prevents loss    |
+| Embed own DESIGN.md + TRACING doc         | Self-referential: the system can explain itself — powerful demo                    |
+| `ChatModel` (not `ChatLanguageModel`)     | LangChain4j 1.11.0 renamed the interface; `ChatModel.chat(String)` is the new API|
 
 ## 11. Future Enhancements
 
+### Week 3 — Telemetry Ingestion into RAG
+- **Jaeger API integration:** Pull traces from `http://jaeger:16686/api/traces` programmatically
+- **Trace chunking strategies:** Design chunks per span, per trace, or per error pattern
+- **Telemetry embeddings:** Embed traces/spans/errors into ChromaDB alongside docs
+- **Natural language trace queries:** "Why was the last order slow?" answered from real trace data
+
+### General Enhancements
 - **Error handling:** Add `@ControllerAdvice` with proper HTTP error responses and error span events
 - **Structured JSON logging:** Add `logstash-logback-encoder` for machine-parseable logs (RAG pipeline)
 - **OTel Collector:** Add as an intermediary for routing, sampling, and enrichment
@@ -594,3 +784,5 @@ open http://localhost:16686    # Jaeger UI
 - **Saga Pattern:** Handle distributed transaction rollback
 - **Prometheus + Grafana:** Metrics dashboards alongside traces
 - **K8s resource monitoring:** Node/pod metrics via OTel Collector for infra-level observability
+- **RAG improvements:** Chat memory, multi-turn conversations, streaming responses
+- **Document auto-refresh:** Re-ingest docs on file change (file watcher or scheduled task)

@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rag-service
+  labels:
+    app: rag-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rag-service
+  template:
+    metadata:
+      labels:
+        app: rag-service
+    spec:
+      containers:
+        - name: rag-service
+          image: rag-service:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8084
+          env:
+            - name: RAG_CHROMA_BASE-URL
+              value: "http://chromadb:8000"
+            - name: LANGCHAIN4J_OLLAMA_CHAT-MODEL_BASE-URL
+              value: "http://ollama:11434"
+            - name: LANGCHAIN4J_OLLAMA_EMBEDDING-MODEL_BASE-URL
+              value: "http://ollama:11434"
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8084
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8084
+            initialDelaySeconds: 45
+            periodSeconds: 15
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rag-service
+spec:
+  selector:
+    app: rag-service
+  ports:
+    - port: 8084
+      targetPort: 8084

@@ -11,6 +11,15 @@ services:
       - COLLECTOR_OTLP_ENABLED=true
     command: ["--set", "receivers.otlp.protocols.http.endpoint=0.0.0.0:4318"]
 
+  # --- Vector Database ---
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: chromadb
+    ports:
+      - "8000:8000"
+    volumes:
+      - chroma-data:/chroma/chroma
+
   # --- Microservices ---
   product-service:
     build:
@@ -51,3 +60,21 @@ services:
       - MANAGEMENT_OTLP_TRACING_ENDPOINT=http://jaeger:4318/v1/traces
     depends_on:
       - jaeger
+
+  # --- RAG Service ---
+  rag-service:
+    build:
+      context: ./rag-service
+      dockerfile: Dockerfile
+    container_name: rag-service
+    ports:
+      - "8084:8084"
+    environment:
+      - RAG_CHROMA_BASE-URL=http://chromadb:8000
+      - LANGCHAIN4J_OLLAMA_CHAT-MODEL_BASE-URL=http://host.docker.internal:11434
+      - LANGCHAIN4J_OLLAMA_EMBEDDING-MODEL_BASE-URL=http://host.docker.internal:11434
+    depends_on:
+      - chromadb
+
+volumes:
+  chroma-data:

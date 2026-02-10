@@ -256,37 +256,48 @@ The `traceId` is identical across all three services. This means:
 
 ---
 
-## Q: What's still missing for Week 1 completion?
+## Q: What's the current instrumentation status?
 
-| Item | Status | What's Needed |
-|------|--------|---------------|
+| Item | Status | Details |
+|------|--------|---------|
 | HTTP auto-instrumentation | ✅ Done | Micrometer + RestClient.Builder handles this |
-| Database query spans | ❌ Missing | Need JDBC/JPA instrumentation dependency |
-| Custom business spans | ❌ Missing | Need `@Observed` on key methods or manual Span API |
-| Structured JSON logging | ❌ Missing | Need logstash-logback-encoder + logback-spring.xml |
-| OTLP export endpoint | ❌ Missing | Need Jaeger/Tempo + endpoint config in application.yml |
+| Custom business spans | ✅ Done | `@Observed` on key methods + `ObservedAspect` bean |
+| OTLP export to Jaeger | ✅ Done | OTLP HTTP endpoint → Jaeger :4318 |
 | Trace correlation in logs | ✅ Done | traceId/spanId in log pattern |
+| RAG pipeline (Week 2) | ✅ Done | LangChain4j + Ollama + ChromaDB |
+| Database query spans | ❌ Future | Need JDBC/JPA instrumentation dependency |
+| Structured JSON logging | ❌ Future | Need logstash-logback-encoder + logback-spring.xml |
+| Telemetry ingestion (Week 3) | ❌ Future | Pull traces from Jaeger API → embed into ChromaDB |
 
 ---
 
-## Q: What custom spans would I add and why?
+## Q: What custom spans did I add and why?
 
-If I were adding custom spans (next step after this doc), I'd instrument these specific operations:
+We added `@Observed` annotations on key business methods. Here's what's instrumented and the rationale:
 
 **product-service:**
-- `validate-product-exists` — distinguish "product lookup" from "product not found" errors
-- `check-stock-availability` — when stock checks become complex (reserved stock, warehouse allocation)
+- `@Observed("get-all-products")` on `ProductService.getAllProducts()` — tracks catalog listing performance
+- `@Observed("get-product-by-id")` on `ProductService.getProductById()` — tracks individual product lookups; critical because order-service calls this per item
 
 **order-service:**
-- `validate-order-items` — the loop that calls product-service for each item. Wrapping the entire loop shows total validation time vs individual product lookups
-- `calculate-order-total` — usually fast, but custom pricing logic can be surprisingly slow
-- `persist-order` — the JPA save. Separate from the DB span to show ORM overhead vs raw SQL time
+- `@Observed("create-order")` on `OrderService.createOrder()` — wraps the entire order orchestration (validation → save → payment)
+- `@Observed("validate-order-items")` on `OrderService.validateAndBuildItems()` — wraps the product validation loop. This is a separate span because isolating validation time from payment time tells you different things about latency
 
 **payment-service:**
-- `process-payment` — the core business operation (currently the 150ms sleep)
-- `fraud-check` — when fraud detection is added, this becomes a critical span for latency analysis
+- `@Observed("process-payment")` on `PaymentService.processPayment()` — wraps payment processing including the 150ms simulated delay
 
-**Why these specific spans?** Each one represents a **decision point** in the code where the outcome affects the trace story. A span around "calculate total" is useful because if it's slow, the fix is different (optimize pricing logic) than if "persist order" is slow (optimize database).
+**Why `@Observed` over manual Span API?**
+- Declarative: one annotation vs 10+ lines of try/finally span management
+- Automatic error recording: exceptions automatically set the span's error status
+- Micrometer integration: `@Observed` creates both a span AND a timer metric — two-for-one instrumentation
+- Requires: `spring-boot-starter-aop` dependency + `ObservedAspect` bean registered in each service's `ObservationConfig`
+
+**Why these specific spans?** Each one represents a **decision point** in the code where the outcome affects the trace story. A span around "validate-order-items" is useful because if it's slow, the fix is different (product-service is slow, or too many items) than if "process-payment" is slow (payment gateway latency).
+
+**Spans we could still add:**
+- `check-stock-availability` — when stock checks become complex (reserved stock, warehouse allocation)
+- `calculate-order-total` — usually fast, but custom pricing logic can be surprisingly slow
+- `fraud-check` — when fraud detection is added to payment-service
 
 ---
 
@@ -305,5 +316,129 @@ The ultimate goal is building a RAG pipeline on traces. Here's how each instrume
 5. **Structured JSON logs are queryable.** Plain text logs require regex parsing. JSON logs with typed fields (traceId, level, service, duration) are directly indexable. For RAG, this means faster retrieval and more accurate context.
 
 The instrumentation decisions made today determine what questions you can answer tomorrow. If you don't trace database queries, no amount of RAG sophistication will tell you about the N+1 problem. If you don't add custom spans, the RAG can say "payment-service was slow" but not "the fraud check within payment-service was slow."
+
+**Instrument for the questions you want to answer.**
+
+---
+
+## Q: How does the RAG pipeline (Week 2) actually work?
+
+The `rag-service` is a fourth microservice that uses Retrieval-Augmented Generation to answer questions about the system. It doesn't participate in the order flow — it's an observability/knowledge tool.
+
+**The pipeline has two phases:**
+
+**Phase 1: Ingestion (`POST /ingest`)**
+1. Load `.md` files from `classpath:docs/` (currently DESIGN.md and this file)
+2. Split each document into chunks of 1000 characters with 200-character overlap using `DocumentSplitters.recursive()`
+3. Generate vector embeddings for each chunk via Ollama's `nomic-embed-text` model
+4. Store embeddings + text in ChromaDB (vector database)
+
+**Phase 2: Query (`POST /ask`)**
+1. User submits a question: `{"question": "How does trace propagation work?"}`
+2. The question is embedded using the same `nomic-embed-text` model
+3. ChromaDB performs similarity search — returns the top 5 most relevant chunks (min score 0.5)
+4. Chunks are assembled into a prompt with the original question
+5. The prompt is sent to Ollama's `llama3.2` chat model
+6. The LLM generates an answer grounded in the retrieved context
+
+**Why this architecture?** LLMs hallucinate. By retrieving actual documentation and feeding it as context, the answers are grounded in facts. The model can only use what we give it — that's the "retrieval-augmented" part.
+
+---
+
+## Q: Why LangChain4j? Why not Spring AI?
+
+Both are viable, but LangChain4j was chosen for several reasons:
+
+1. **More mature RAG abstractions** — LangChain4j has built-in `EmbeddingStoreIngestor`, `DocumentSplitters`, and `ContentRetriever` that compose cleanly. Spring AI's RAG support is newer and less battle-tested.
+
+2. **BOM-managed dependencies** — The `langchain4j-bom` ensures all modules (core, ollama, chroma, tika) have compatible versions. No version conflicts.
+
+3. **Ollama Spring Boot Starter** — `langchain4j-ollama-spring-boot-starter` auto-configures both chat and embedding models from `application.yml` properties. Zero boilerplate.
+
+4. **Direct ChatModel interface** — `ChatModel.chat(String)` takes a prompt string and returns a response string. Simple enough for learning, but the same interface supports streaming, tool use, and structured output when you need it.
+
+**Trade-off:** Spring AI is the "official" Spring ecosystem choice and has deeper Spring Boot integration. If this project were production Spring-first, Spring AI might be the better bet. For learning RAG concepts, LangChain4j's explicit pipeline is more educational.
+
+---
+
+## Q: Why Ollama instead of OpenAI/Claude API?
+
+1. **Free** — No API key, no billing, no rate limits. Critical for a learning project where you'll run many iterations.
+2. **Local** — All data stays on your machine. No privacy concerns with sending trace data to a cloud API.
+3. **Fast iteration** — No network latency to an API endpoint. Model responses are limited by your machine's speed, not API quotas.
+4. **Swappable** — The `ChatModel` interface is the same regardless of provider. Switching to OpenAI later is a config change, not a code change.
+
+**Models chosen:**
+- `llama3.2` (~2GB) for chat — lightweight but capable enough for Q&A over documentation
+- `nomic-embed-text` (~274MB) for embeddings — small, fast, good quality for text similarity
+
+---
+
+## Q: Why ChromaDB instead of Weaviate, Pinecone, or pgvector?
+
+**Simplicity.** ChromaDB is:
+- One Docker container: `docker run -d -p 8000:8000 chromadb/chroma:latest`
+- No authentication, no schema setup, no cloud account
+- Collections are created automatically on first insert
+- Good enough for thousands of document chunks (our scale)
+
+**Trade-offs we accepted:**
+- No persistence guarantees (fine for dev — re-ingest if data is lost)
+- No built-in auth (fine for local dev)
+- Limited query features compared to Weaviate (don't need them yet)
+
+For Week 3 (telemetry ingestion), ChromaDB's simplicity becomes even more valuable — we'll be experimenting with different chunking strategies for traces, and fast iteration matters more than durability.
+
+---
+
+## Q: Why recursive document splitting at 1000/200?
+
+**Chunk size: 1000 characters**
+- Too small (e.g., 200 chars): chunks lose context, answers are fragmented
+- Too large (e.g., 5000 chars): chunks are diluted with irrelevant info, embedding quality drops
+- 1000 chars: roughly a paragraph — usually captures one complete thought
+
+**Overlap: 200 characters**
+- Without overlap: sentences at chunk boundaries get split, losing meaning
+- 200 chars: ensures the last ~2 sentences of chunk N appear in the start of chunk N+1
+- This prevents "lost context at boundaries" — a common RAG failure mode
+
+**Recursive splitting** is smarter than naive character splitting — it tries to split on paragraph breaks, then sentence breaks, then word breaks. This preserves semantic units better than splitting mid-sentence.
+
+**For Week 3:** Trace data will need a different chunking strategy. A single trace might be chunked per span, per service, or per error pattern. The 1000/200 strategy works for prose documentation but may not be optimal for structured telemetry data.
+
+---
+
+## Q: Why embed our own DESIGN.md and TRACING_THOUGHT_PROCESS.md?
+
+This is the most interesting design choice: **the system can explain itself.**
+
+The RAG service ingests the very documents that describe how the system works. So you can ask:
+- "How does trace propagation work between services?" → answers from DESIGN.md
+- "Why do we use RestClient instead of RestTemplate?" → answers from DESIGN.md
+- "How would tracing help debug a slow order?" → answers from THIS document
+
+**This is deliberately self-referential for learning purposes.** In a production system, you'd embed:
+- Runbooks (how to respond to alerts)
+- Architecture docs (how services interact)
+- Incident postmortems (what went wrong before)
+- And eventually — traces and spans themselves (Week 3)
+
+The pattern is the same regardless of what you embed. Start with docs → add traces → add logs → add metrics. Each layer makes the RAG more capable.
+
+---
+
+## Q: How does the RAG pipeline connect to the tracing story?
+
+**Week 1:** We built microservices with distributed tracing → traces exported to Jaeger.
+
+**Week 2 (now):** We built a RAG pipeline that answers questions about the system → using project documentation.
+
+**Week 3 (next):** We'll connect the two — pull traces from Jaeger's API, chunk them, embed them into ChromaDB, and answer questions like:
+- "Why was the last order slow?" → retrieves actual trace data showing the slow span
+- "Which service has the most errors this hour?" → retrieves error spans and summarizes
+- "What pattern do payment failures follow?" → retrieves error traces and finds commonalities
+
+**This is the full vision:** observability data (traces, logs, metrics) becomes queryable through natural language. Instead of writing PromQL queries or Jaeger search filters, you ask a question and the RAG pipeline finds the relevant telemetry and explains it.
 
 **Instrument for the questions you want to answer.**

@@ -1,0 +1,35 @@
+server:
+  port: 8084
+
+spring:
+  application:
+    name: rag-service
+
+# --- LangChain4j Ollama Configuration ---
+langchain4j:
+  ollama:
+    chat-model:
+      base-url: http://localhost:11434
+      model-name: llama3.2
+      temperature: 0.7
+      timeout: PT120S
+      log-requests: true
+      log-responses: true
+    embedding-model:
+      base-url: http://localhost:11434
+      model-name: nomic-embed-text
+      timeout: PT120S
+
+# --- RAG Configuration ---
+rag:
+  chroma:
+    base-url: http://localhost:8000
+    collection-name: incident-triage-docs
+  docs:
+    path: classpath:docs/
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

@@ -15,5 +15,6 @@
         <module>product-service</module>
         <module>order-service</module>
         <module>payment-service</module>
+        <module>rag-service</module>
     </modules>
 </project>
