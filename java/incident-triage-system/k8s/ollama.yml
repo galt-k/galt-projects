@@ -1,0 +1,21 @@
+# Ollama runs on the host machine (macOS), not inside K8s.
+# This Service + Endpoints pair lets pods reach it via "ollama:11434".
+# Make sure 'ollama serve' is running on your Mac before deploying.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama
+spec:
+  ports:
+    - port: 11434
+      targetPort: 11434
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: ollama
+subsets:
+  - addresses:
+      - ip: "192.168.65.254"   # Docker Desktop host gateway (host.minikube.internal)
+    ports:
+      - port: 11434

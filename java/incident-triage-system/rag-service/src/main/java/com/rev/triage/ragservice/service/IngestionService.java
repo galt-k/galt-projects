@@ -1,41 +1,63 @@
 package com.rev.triage.ragservice.service;
 
-import dev.langchain4j.data.document.Document;
-import dev.langchain4j.data.document.loader.FileSystemDocumentLoader;
-import dev.langchain4j.data.document.parser.TextDocumentParser;
-import dev.langchain4j.data.document.splitter.DocumentSplitters;
-import dev.langchain4j.data.segment.TextSegment;
-import dev.langchain4j.model.embedding.EmbeddingModel;
-import dev.langchain4j.store.embedding.EmbeddingStore;
-import dev.langchain4j.store.embedding.EmbeddingStoreIngestor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.ai.document.Document;
+import org.springframework.ai.reader.TextReader;
+import org.springframework.ai.transformer.splitter.TokenTextSplitter;
+import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
+/**
+ * Ingests documentation (.md files) into ChromaDB for RAG retrieval.
+ *
+ * Migrated from LangChain4j → Spring AI:
+ *   - FileSystemDocumentLoader     → TextReader(resource)
+ *   - EmbeddingStoreIngestor       → TokenTextSplitter + VectorStore.add()
+ *   - embeddingStore.removeAll()   → vectorStore.delete(filterExpression)
+ *   - LangChain4j Document         → Spring AI Document
+ *   - LangChain4j Metadata         → Map<String, Object>
+ *
+ * Spring AI auto-configures:
+ *   - VectorStore (ChromaVectorStore) — via spring-ai-starter-vector-store-chroma
+ *   - EmbeddingModel (OllamaEmbeddingModel) — via spring-ai-ollama-spring-boot-starter
+ *   The VectorStore automatically uses the EmbeddingModel to embed documents on add().
+ *   No need to manually wire the embedding model — Spring AI handles it.
+ */
 @Service
 public class IngestionService {
 
     private static final Logger log = LoggerFactory.getLogger(IngestionService.class);
 
-    private final EmbeddingStore<TextSegment> embeddingStore;
-    private final EmbeddingModel embeddingModel;
+    private final VectorStore vectorStore;
 
     @Value("${rag.docs.path}")
     private String docsPath;
 
-    public IngestionService(EmbeddingStore<TextSegment> embeddingStore,
-                            EmbeddingModel embeddingModel) {
-        this.embeddingStore = embeddingStore;
-        this.embeddingModel = embeddingModel;
+    public IngestionService(VectorStore vectorStore) {
+        this.vectorStore = vectorStore;
+    }
+
+    /**
+     * Remove all existing documentation chunks from ChromaDB.
+     * Called before re-ingestion to prevent duplicates across restarts.
+     */
+    public void clearExistingDocuments() {
+        try {
+            vectorStore.delete("type == 'documentation'");
+            log.info("Cleared existing documentation chunks from ChromaDB");
+        } catch (Exception e) {
+            log.debug("Could not clear existing docs (collection may be empty): {}", e.getMessage());
+        }
     }
 
     public int ingestDocuments() {
@@ -49,15 +71,14 @@ public class IngestionService {
 
         log.info("Loaded {} documents, starting chunking and embedding...", documents.size());
 
-        EmbeddingStoreIngestor ingestor = EmbeddingStoreIngestor.builder()
-                .documentSplitter(DocumentSplitters.recursive(1000, 200))
-                .embeddingModel(embeddingModel)
-                .embeddingStore(embeddingStore)
-                .build();
+        // TokenTextSplitter: 1000 tokens per chunk, min 200 chars, min 5 chars to embed
+        TokenTextSplitter splitter = new TokenTextSplitter(1000, 200, 5, 10000, true);
+        List<Document> chunks = splitter.split(documents);
 
-        ingestor.ingest(documents);
+        vectorStore.add(chunks);
 
-        log.info("Successfully ingested {} documents into ChromaDB", documents.size());
+        log.info("Successfully ingested {} documents ({} chunks) into ChromaDB",
+                documents.size(), chunks.size());
         return documents.size();
     }
 
@@ -69,18 +90,19 @@ public class IngestionService {
 
             for (Resource resource : resources) {
                 try {
-                    Path tempFile = Files.createTempFile("doc-", ".md");
-                    Files.copy(resource.getInputStream(), tempFile,
-                            java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    // Spring AI TextReader reads a Resource directly — no temp files needed
+                    TextReader textReader = new TextReader(resource);
+                    List<Document> docs = textReader.read();
 
-                    Document doc = FileSystemDocumentLoader.loadDocument(
-                            tempFile, new TextDocumentParser());
-                    doc.metadata().put("source", resource.getFilename());
-                    documents.add(doc);
+                    // Add metadata to each document
+                    for (Document doc : docs) {
+                        doc.getMetadata().put("source", resource.getFilename());
+                        doc.getMetadata().put("type", "documentation");
+                    }
 
+                    documents.addAll(docs);
                     log.info("Loaded document: {}", resource.getFilename());
-                    Files.deleteIfExists(tempFile);
-                } catch (IOException e) {
+                } catch (Exception e) {
                     log.error("Failed to load document: {}", resource.getFilename(), e);
                 }
             }

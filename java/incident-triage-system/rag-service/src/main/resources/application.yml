@@ -5,31 +5,135 @@ spring:
   application:
     name: rag-service
 
-# --- LangChain4j Ollama Configuration ---
-langchain4j:
-  ollama:
-    chat-model:
+  # --- Spring AI Configuration ---
+  #
+  # Migrated from LangChain4j 1.11.0 → Spring AI 1.0.2
+  # Why? Spring AI is built by the Spring team — first-class auto-configuration,
+  # native Spring Boot starters, same patterns as spring-data, spring-security, etc.
+  #
+  ai:
+    ollama:
       base-url: http://localhost:11434
-      model-name: llama3.2
-      temperature: 0.7
-      timeout: PT120S
-      log-requests: true
-      log-responses: true
-    embedding-model:
-      base-url: http://localhost:11434
-      model-name: nomic-embed-text
-      timeout: PT120S
+      chat:
+        options:
+          model: llama3.2
+          temperature: 0.3       # Low temperature for factual RAG answers (less hallucination)
+      embedding:
+        options:
+          model: nomic-embed-text
+    vectorstore:
+      chroma:
+        client:
+          host: localhost
+          port: 8000
+        collection-name: incident-triage-docs
+        initialize-schema: true    # Auto-create collection if it doesn't exist
 
 # --- RAG Configuration ---
 rag:
-  chroma:
-    base-url: http://localhost:8000
-    collection-name: incident-triage-docs
   docs:
     path: classpath:docs/
+  jaeger:
+    api-url: http://localhost:16686
+  startup:
+    ingest-docs: true           # Auto-ingest docs on startup
+    ingest-traces: true         # Auto-ingest traces on startup (async)
+    traces-lookback: 1h         # How far back to look for traces
+    traces-limit: 50            # Max traces per service
+  schedule:
+    trace-polling-enabled: true       # Poll Jaeger for new traces automatically
+    trace-polling-interval: 300000    # Every 5 minutes (in ms)
+    trace-polling-lookback: 10m       # Only look back 10 min (picks up recent traces)
+    trace-polling-limit: 20           # Max traces per service per poll
+
+# --- Resilience4j Configuration ---
+#
+# THOUGHT PROCESS:
+#   chatModel.chat(prompt) is the user-facing LLM call. If Ollama is down:
+#   - Without resilience: hangs for 120s, returns 500, every request suffers
+#   - With circuit breaker: after 5 failures, instantly rejects for 30s, returns fallback
+#   - With timeout: each call capped at 30s instead of 120s
+#
+#   Why these specific values?
+#   - slidingWindowSize: 10 — evaluate last 10 calls to decide if Ollama is healthy
+#   - failureRateThreshold: 50 — if 5 out of 10 fail, Ollama is probably down
+#   - waitDurationInOpenState: 30s — check again after 30s (Ollama might restart)
+#   - permittedNumberOfCallsInHalfOpenState: 3 — try 3 calls to confirm recovery
+#   - slowCallDurationThreshold: 25s — if LLM takes >25s, count it as slow
+#   - slowCallRateThreshold: 80 — if 80% of calls are slow, trip the breaker
+#   - timeout: 30s — no single LLM call should take more than 30s
+#
+resilience4j:
+  circuitbreaker:
+    instances:
+      ollamaChat:
+        # --- Sliding Window: How we measure health ---
+        slidingWindowType: COUNT_BASED          # measure by last N calls (not time window)
+        slidingWindowSize: 10                   # evaluate the last 10 calls
+        minimumNumberOfCalls: 5                 # need at least 5 calls before evaluating
+
+        # --- When to OPEN the circuit (stop sending requests) ---
+        failureRateThreshold: 50                # open if >= 50% of calls fail
+        slowCallDurationThreshold: 25s          # a call taking >25s counts as "slow"
+        slowCallRateThreshold: 80               # open if >= 80% of calls are slow
+
+        # --- When to try again (HALF_OPEN state) ---
+        waitDurationInOpenState: 30s            # wait 30s before trying again
+        permittedNumberOfCallsInHalfOpenState: 3 # try 3 calls to test if Ollama recovered
+
+        # --- What counts as a failure ---
+        recordExceptions:                       # these exceptions trip the breaker
+          - java.lang.RuntimeException           # Ollama connection refused, timeout, etc.
+          - java.io.IOException                  # network failures
+          - java.net.ConnectException            # Ollama not running
+
+        # --- Actuator integration ---
+        registerHealthIndicator: true           # show in /actuator/health
+        eventConsumerBufferSize: 20             # keep last 20 events for /actuator/circuitbreakerevents
+
+  # --- Retry: Jaeger API calls ---
+  #
+  # THOUGHT PROCESS:
+  #   Jaeger API calls (GET /api/services, GET /api/traces) are:
+  #   - FAST (<100ms each) — retrying is cheap
+  #   - BACKGROUND (startup + scheduler) — no user waiting
+  #   - READ-ONLY — retrying is always safe (idempotent)
+  #   - HIGH CONSEQUENCE if they fail — missed traces = gaps in RAG knowledge base
+  #
+  #   Common transient failures: pod restart, network blip, Jaeger briefly overloaded.
+  #   These self-resolve in 1-2 seconds. Retry handles them perfectly.
+  #
+  #   Note: The per-call methods (getServices, getTraces) use MANUAL retry loops
+  #   because they're called from getAllTraces() via self-call (Spring AOP bypass).
+  #   The @Retry annotation on getAllTraces() is the OUTER safety net for when
+  #   Jaeger is completely unreachable even after per-call retries.
+  #
+  retry:
+    instances:
+      jaegerApi:
+        maxAttempts: 3                             # 1 original + 2 retries
+        waitDuration: 2s                           # wait 2s between retries (give Jaeger time to recover)
+        retryExceptions:                           # only retry on network/connection failures
+          - java.lang.RuntimeException
+          - java.io.IOException
+          - java.net.ConnectException
+        ignoreExceptions:                          # don't retry on parsing/logic errors
+          - com.fasterxml.jackson.core.JsonProcessingException
+
+  timelimiter:
+    instances:
+      ollamaChat:
+        timeoutDuration: 30s                    # cancel if LLM takes longer than 30s
+        cancelRunningFuture: true               # interrupt the thread on timeout
 
 management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,circuitbreakers,circuitbreakerevents
+  endpoint:
+    health:
+      show-details: always                       # show component details in /actuator/health
+  health:
+    circuitbreakers:
+      enabled: true                             # show CB state in /actuator/health

@@ -80,6 +80,7 @@ processing payments. All telemetry is exported via OTLP to Jaeger for trace visu
 | LLM (local)     | Ollama (llama3.2 chat + nomic-embed-text)  |
 | Vector Store     | ChromaDB                                   |
 | Doc Parsing      | Apache Tika (via LangChain4j)              |
+| Resilience       | Resilience4j 2.3.0 (circuit breaker + retry) |
 
 ## 4. Project Structure
 
@@ -154,12 +155,17 @@ incident-triage-system/
 │       ├── java/com/rev/triage/ragservice/
 │       │   ├── RagServiceApplication.java
 │       │   ├── config/RagConfig.java              # ChromaDB + ContentRetriever beans
+│       │   ├── client/JaegerClient.java           # HTTP client for Jaeger REST API
 │       │   ├── service/IngestionService.java      # Doc loading, chunking, embedding
-│       │   ├── service/RagQueryService.java       # RAG query (retrieve + LLM chat)
-│       │   ├── controller/RagController.java      # /ask, /ingest, /health
+│       │   ├── service/TelemetryIngestionService.java  # Trace → Document → ChromaDB
+│       │   ├── service/RagQueryService.java       # RAG orchestrator (retrieve + LLM)
+│       │   ├── service/OllamaChatService.java     # Circuit-breaker-protected LLM calls
+│       │   ├── rag/QueryClassifier.java           # Query intent classification
+│       │   ├── controller/RagController.java      # /ask, /ingest, /ingest/traces, /health
 │       │   └── dto/
 │       │       ├── AskRequest.java
-│       │       └── AskResponse.java
+│       │       ├── AskResponse.java
+│       │       └── IngestTracesRequest.java
 │       └── resources/
 │           ├── application.yml
 │           └── docs/                              # Embedded documents
@@ -168,6 +174,8 @@ incident-triage-system/
 │
 └── k8s/                               # Kubernetes manifests
     ├── jaeger.yml                     # Jaeger Deployment + Service
+    ├── chromadb.yml                   # ChromaDB Deployment + Service
+    ├── ollama.yml                     # Ollama Service + Endpoints (host.minikube.internal)
     ├── product-service.yml            # Deployment + Service + health probes
     ├── order-service.yml              # Deployment + Service + health probes
     ├── payment-service.yml            # Deployment + Service + health probes
@@ -302,45 +310,71 @@ incident-triage-system/
 
 ### 5.4 rag-service (Port 8084)
 
-**Purpose:** RAG (Retrieval-Augmented Generation) pipeline — ingests project documentation into a vector store, then
-answers natural language questions by retrieving relevant chunks and passing them to a local LLM.
+**Purpose:** RAG (Retrieval-Augmented Generation) pipeline — ingests project documentation AND live telemetry
+(traces from Jaeger) into a vector store, then answers natural language questions by retrieving relevant chunks
+and passing them to a local LLM.
 
 **Endpoints:**
 
-| Method | Path      | Description                             |
-| :----- | :-------- | :-------------------------------------- |
-| POST   | `/ask`    | Ask a question about the system         |
-| POST   | `/ingest` | Trigger document ingestion into ChromaDB |
-| GET    | `/health` | Health check                            |
+| Method | Path              | Description                                   |
+| :----- | :---------------- | :-------------------------------------------- |
+| POST   | `/ask`            | Ask a question about the system               |
+| POST   | `/ingest`         | Ingest project documentation into ChromaDB    |
+| POST   | `/ingest/traces`  | Ingest live traces from Jaeger into ChromaDB  |
+| GET    | `/health`         | Health check                                  |
 
-**RAG Pipeline Flow:**
+**Dual Ingestion Pipeline:**
 
 ```
-                    POST /ingest                        POST /ask
-                        │                                   │
-                        ▼                                   ▼
-              ┌─────────────────┐                ┌─────────────────────┐
-              │ IngestionService│                │  RagQueryService    │
-              │                 │                │                     │
-              │ 1. Load .md     │                │ 1. Retrieve chunks  │
-              │    from docs/   │                │    from ChromaDB    │
-              │ 2. Chunk (1000  │                │ 2. Build prompt     │
-              │    chars, 200   │                │    with context     │
-              │    overlap)     │                │ 3. Send to Ollama   │
-              │ 3. Embed via    │                │    (llama3.2)       │
-              │    Ollama       │                │ 4. Return answer    │
-              │ 4. Store in     │                │                     │
-              │    ChromaDB     │                └──────┬──────┬───────┘
-              └───────┬─────┬── ┘                       │      │
-                      │     │                   retrieve│  chat│
-                 embed│     │store                      │      │
-                      ▼     ▼                           ▼      ▼
-              ┌──────────┐ ┌──────────┐        ┌──────────┐ ┌────────┐
-              │  Ollama  │ │ ChromaDB │        │ ChromaDB │ │ Ollama │
-              │(nomic-   │ │          │        │          │ │(llama  │
-              │embed-text│ │          │        │          │ │ 3.2)   │
-              └──────────┘ └──────────┘        └──────────┘ └────────┘
+  POST /ingest              POST /ingest/traces             POST /ask
+       │                          │                              │
+       ▼                          ▼                              ▼
+┌─────────────┐         ┌──────────────────────┐      ┌─────────────────────┐
+│ Ingestion   │         │ TelemetryIngestion   │      │  RagQueryService    │
+│ Service     │         │ Service              │      │                     │
+│             │         │                      │      │ 1. Retrieve chunks  │
+│ 1. Load .md │         │ 1. JaegerClient      │      │    (docs + traces)  │
+│    from     │         │    fetches traces     │      │ 2. Build prompt     │
+│    docs/    │         │    from Jaeger API    │      │    (trace-aware)    │
+│ 2. Chunk    │         │ 2. Convert each trace │      │ 3. Send to Ollama   │
+│    (1000/   │         │    to human-readable  │      │ 4. Return answer    │
+│    200)     │         │    narrative          │      │                     │
+│ 3. Embed    │         │ 3. Chunk (1500/300)   │      └──────┬──────┬───────┘
+│ 4. Store    │         │ 4. Embed + store      │             │      │
+└──────┬──────┘         └───────────┬───────────┘      retrieve│  chat│
+       │                            │                         │      │
+       ▼                            ▼                         ▼      ▼
+  ┌──────────┐              ┌──────────────┐          ┌──────────┐ ┌────────┐
+  │ ChromaDB │              │  Jaeger API  │          │ ChromaDB │ │ Ollama │
+  │ (docs)   │              │  :16686      │          │(docs +   │ │(llama  │
+  └──────────┘              └──────────────┘          │ traces)  │ │ 3.2)   │
+                                                      └──────────┘ └────────┘
 ```
+
+**Telemetry Ingestion Flow (Week 3):**
+
+1. `JaegerClient` calls `GET /api/services` to discover traced services
+2. For each service, fetches traces via `GET /api/traces?service=X&lookback=1h&limit=20`
+3. `TelemetryIngestionService` converts each trace JSON into a human-readable narrative:
+   - Trace header: traceId, root operation, total duration, span count, error status
+   - Span breakdown: each span with service, operation, duration, tags, errors
+   - Performance notes for slow traces (>500ms) identifying the bottleneck span
+   - Error summaries for traces with failures
+4. Each trace Document gets rich metadata: `traceId`, `rootService`, `durationMs`, `hasErrors`, `type=telemetry`
+5. Documents are chunked with `recursive(1500, 300)` — larger chunks than docs because trace data is structured
+6. Chunks are embedded via `nomic-embed-text` and stored in ChromaDB alongside documentation chunks
+
+**Chunking Strategy — Docs vs. Traces:**
+
+| Data Type | Chunk Size | Overlap | Rationale |
+|-----------|-----------|---------|-----------|
+| Documentation (.md) | 1000 chars | 200 | Prose paragraphs — one thought per chunk |
+| Traces (Jaeger) | 1500 chars | 300 | Structured data needs more context per chunk; a trace with 10+ spans is ~2000 chars |
+
+**Why per-trace chunking (not per-span)?**
+A single span like "GET /products/1 took 15ms" is meaningless in isolation. A trace tells the full story:
+"Order creation took 400ms — 50ms validating products, 15ms per product lookup, 170ms in payment processing."
+The RAG pipeline needs stories, not isolated facts.
 
 **Dependencies (LangChain4j BOM 1.11.0):**
 
@@ -384,6 +418,44 @@ answers natural language questions by retrieving relevant chunks and passing the
 
 **Documents Ingested:** The project's own `DESIGN.md` and `TRACING_THOUGHT_PROCESS.md` — so you can ask the
 RAG system questions about the system it's part of.
+
+**Resilience4j Circuit Breaker (Week 4):**
+
+The `/ask` endpoint makes TWO external calls that can fail:
+
+```
+ask(question) ──► contentRetriever.retrieve()  ──► Ollama /api/embed + ChromaDB search
+                              │
+                   (if succeeds)
+                              │
+                  ollamaChatService.call() ──► Ollama /api/chat  ← CIRCUIT BREAKER
+```
+
+| Failure Mode | What Happens | User Experience |
+|---|---|---|
+| Ollama down | Embedding fails → try-catch → graceful error message | 200 OK with explanation |
+| ChromaDB down | Retrieval fails → try-catch → graceful error message | 200 OK with explanation |
+| Ollama slow (>25s) | Circuit breaker counts as slow call; if 80%+ slow, trips breaker | Fallback: raw chunks |
+| Circuit breaker OPEN | `CallNotPermittedException` → instant rejection (no waiting) | Fallback: raw chunks |
+| Ollama recovers | HALF_OPEN state → 3 test calls → if pass, CLOSED again | Auto-recovery |
+
+Circuit breaker config:
+- Sliding window: 10 calls (COUNT_BASED)
+- Failure threshold: 50% (5/10 failures → OPEN)
+- Slow call threshold: 25s duration, 80% rate
+- Wait in OPEN: 30s before trying HALF_OPEN
+- Permitted calls in HALF_OPEN: 3 test calls
+
+The LLM call is in a **separate `OllamaChatService` bean** (not in `RagQueryService`) because Spring AOP
+proxies don't intercept self-calls — `@CircuitBreaker` on a method called within the same class is silently ignored.
+
+**Actuator Endpoints:**
+
+| Endpoint | Purpose |
+|---|---|
+| `/actuator/health` | Overall health including circuit breaker state |
+| `/actuator/circuitbreakers` | Circuit breaker metrics (buffered/failed/slow calls, state) |
+| `/actuator/circuitbreakerevents` | Last 20 circuit breaker events |
 
 ## 6. Inter-Service Communication
 
@@ -645,7 +717,7 @@ mvn clean package -DskipTests
 
 # Start Jaeger (for trace visualization)
 docker run -d --name jaeger -p 16686:16686 -p 4318:4318 \
-  jaegertracing/jaeger:2.4 \
+  jaegertracing/jaeger:2.4.0 \
   --set receivers.otlp.protocols.http.endpoint=0.0.0.0:4318
 
 # Start ChromaDB (for vector store)
@@ -661,20 +733,7 @@ java -jar payment-service/target/payment-service-0.0.1-SNAPSHOT.jar
 java -jar rag-service/target/rag-service-0.0.1-SNAPSHOT.jar
 ```
 
-### 9.2 Docker Compose
-
-```bash
-# Build JARs first
-mvn clean package -DskipTests
-
-# Start everything
-docker compose up --build
-
-# Tear down
-docker compose down
-```
-
-### 9.3 Kubernetes (Minikube)
+### 9.2 Kubernetes (Minikube)
 
 ```bash
 # Start Minikube
@@ -703,37 +762,74 @@ kubectl port-forward svc/order-service 8082:8082  # Order API
 kubectl port-forward svc/rag-service 8084:8084    # RAG API
 ```
 
-### 9.4 Test Commands
+### 9.3 Test Commands
+
+> **Note (K8s only):** If running in Kubernetes, you must port-forward before testing:
+> ```bash
+> kubectl port-forward svc/product-service 8081:8081 &
+> kubectl port-forward svc/order-service 8082:8082 &
+> kubectl port-forward svc/payment-service 8083:8083 &
+> kubectl port-forward svc/rag-service 8084:8084 &
+> kubectl port-forward svc/jaeger 16686:16686 &
+> ```
+> Then all `localhost` commands below work the same way.
 
 ```bash
+# --- Core Microservices ---
+
 # List products
 curl http://localhost:8081/products
 
-# Create order (triggers full distributed trace)
+# Get single product
+curl http://localhost:8081/products/1
+
+# Create order (triggers full distributed trace: order -> product -> payment)
 curl -X POST http://localhost:8082/orders \
   -H "Content-Type: application/json" \
   -d '{"items":[{"productId":1,"quantity":2},{"productId":3,"quantity":1}]}'
 
-# View traces
-open http://localhost:16686    # Jaeger UI
+# List payments
+curl http://localhost:8083/payments
+
+# View traces in Jaeger UI
+open http://localhost:16686
 
 # --- RAG Service ---
 
-# Ingest project documents into ChromaDB
-curl -X POST http://localhost:8084/ingest
+# Health check
+curl http://localhost:8084/health
 
-# Ask a question about the system
+# Ask about architecture (answered from documentation — auto-ingested on startup)
 curl -X POST http://localhost:8084/ask \
   -H "Content-Type: application/json" \
   -d '{"question":"How does distributed tracing work in this system?"}'
 
-# Ask about a specific design decision
+# Ask about a specific design decision (answered from documentation)
 curl -X POST http://localhost:8084/ask \
   -H "Content-Type: application/json" \
   -d '{"question":"Why did we choose RestClient over RestTemplate?"}'
 
-# Health check
-curl http://localhost:8084/health
+# Ask about real system behavior (answered from ingested traces)
+curl -X POST http://localhost:8084/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question":"What services are involved in order processing and what are their response times?"}'
+
+# Ask about errors (answered from ingested traces)
+curl -X POST http://localhost:8084/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question":"Were there any errors in recent traces?"}'
+
+# --- Manual Ingestion (optional — both happen automatically) ---
+# Docs are auto-ingested on startup. Traces are auto-ingested on startup
+# and polled every 5 minutes. These endpoints are for manual/forced ingestion.
+
+# Force re-ingest project documents
+curl -X POST http://localhost:8084/ingest
+
+# Force ingest recent traces from Jaeger
+curl -X POST http://localhost:8084/ingest/traces \
+  -H "Content-Type: application/json" \
+  -d '{"lookback":"1h","limit":20}'
 ```
 
 ## 10. Design Decisions
@@ -764,14 +860,45 @@ curl http://localhost:8084/health
 | Recursive splitter (1000/200)             | 1000-char chunks balance context vs. precision; 200-char overlap prevents loss    |
 | Embed own DESIGN.md + TRACING doc         | Self-referential: the system can explain itself — powerful demo                    |
 | `ChatModel` (not `ChatLanguageModel`)     | LangChain4j 1.11.0 renamed the interface; `ChatModel.chat(String)` is the new API|
+| Per-trace chunking (not per-span)         | A span alone lacks context; a trace tells a complete request story for RAG        |
+| Larger chunks for traces (1500/300)       | Structured trace data needs more context per chunk than prose documentation       |
+| Human-readable trace narratives           | LLMs understand prose better than raw JSON; narrative format improves answers     |
+| Jaeger REST API (not gRPC)                | Simpler integration; REST API available out-of-the-box on Jaeger :16686           |
+| Trace-aware LLM prompt                    | Prompt distinguishes docs vs traces; prefers telemetry for operational questions  |
+| Rich trace metadata in ChromaDB           | traceId, service, duration, hasErrors as metadata enables filtered retrieval      |
+| Resilience4j over Hystrix                 | Hystrix is in maintenance; Resilience4j is the Spring Boot 3 standard             |
+| `@CircuitBreaker` annotation (not API)    | Declarative, Spring Boot auto-config, YAML-driven — less boilerplate              |
+| Separate `OllamaChatService` bean         | Spring AOP proxies don't intercept self-calls; `@CircuitBreaker` silently ignored |
+| Circuit breaker on chat, not embedding    | Embedding is inside LangChain4j's retriever; try-catch is simpler and sufficient  |
+| Fallback returns raw chunks               | User gets useful context even without LLM — useful > nothing                      |
+| COUNT_BASED window (not TIME_BASED)       | Simpler to reason about; 10 calls is a clear sample size                          |
+| 30s timeout (lowered from 120s)           | Fail fast → fallback is better than making users wait 2 minutes                   |
+| `show-details: always` on health          | Circuit breaker state visible in `/actuator/health` for operational monitoring     |
+| Retry on Jaeger (not circuit breaker)     | Jaeger calls are fast, background, idempotent — retry recovers transient blips    |
+| Manual retry loops (not @Retry) per-call  | Self-call problem: getServices()/getTraces() called from same class's getAllTraces |
+| @Retry on getAllTraces() as outer safety  | Called from TelemetryIngestionService (different bean) — AOP proxy works           |
 
 ## 11. Future Enhancements
 
-### Week 3 — Telemetry Ingestion into RAG
-- **Jaeger API integration:** Pull traces from `http://jaeger:16686/api/traces` programmatically
-- **Trace chunking strategies:** Design chunks per span, per trace, or per error pattern
-- **Telemetry embeddings:** Embed traces/spans/errors into ChromaDB alongside docs
-- **Natural language trace queries:** "Why was the last order slow?" answered from real trace data
+### ~~Week 3 — Telemetry Ingestion into RAG~~ ✅ DONE
+- ✅ **Jaeger API integration:** `JaegerClient` pulls traces via `GET /api/traces?service=X`
+- ✅ **Trace chunking strategy:** Per-trace documents with human-readable narratives, chunked at 1500/300
+- ✅ **Telemetry embeddings:** Traces embedded into same ChromaDB collection alongside docs
+- ✅ **Natural language trace queries:** "Why was the last order slow?" answered from real trace data
+- ✅ **Trace-aware prompt:** LLM distinguishes documentation from telemetry, prefers traces for operational questions
+
+### ~~Week 4 — RAG Precision + Resilience4j~~ ✅ DONE
+- ✅ **Query classification:** Keyword-based intent detection (ERROR, PERFORMANCE, SERVICE, ARCHITECTURE, GENERAL)
+- ✅ **Metadata filtering:** Dynamic filter on `type`, `hasErrors`, `rootService` per query intent
+- ✅ **Trace deduplication:** In-memory `ConcurrentHashMap.newKeySet()` + `embeddingStore.removeAll()` on re-ingest
+- ✅ **Improved prompts:** Structured prompt with QUERY TYPE, metadata-annotated context (trace IDs, doc sources)
+- ✅ **Lower temperature:** 0.7 → 0.3 for more deterministic, precise answers
+- ✅ **Circuit breaker (Ollama chat):** Resilience4j `@CircuitBreaker` on LLM call with fallback to raw chunks
+- ✅ **Graceful degradation:** Embedding failure returns clear error message (not 500)
+- ✅ **Health endpoint:** `/actuator/circuitbreakers` exposes breaker state (CLOSED/OPEN/HALF_OPEN)
+- ✅ **Spring AOP fix:** Extracted `OllamaChatService` to separate bean (self-call bypass prevention)
+- ✅ **Retry (Jaeger API):** Manual retry loops on getServices()/getTraces() + @Retry on getAllTraces()
+- ✅ **Retry fallback:** Returns empty list after all retries exhausted; next poll cycle catches up
 
 ### General Enhancements
 - **Error handling:** Add `@ControllerAdvice` with proper HTTP error responses and error span events
@@ -780,7 +907,7 @@ curl http://localhost:8084/health
 - **Database spans:** Add JDBC instrumentation for query-level tracing
 - **API Gateway:** Spring Cloud Gateway as a single entry point
 - **Service Discovery:** Eureka or Consul for dynamic service URLs
-- **Circuit Breaker:** Resilience4j for fault tolerance on inter-service calls
+- **More Resilience4j patterns:** Circuit breakers for ChromaDB and Jaeger calls, retry + bulkhead patterns
 - **Saga Pattern:** Handle distributed transaction rollback
 - **Prometheus + Grafana:** Metrics dashboards alongside traces
 - **K8s resource monitoring:** Node/pod metrics via OTel Collector for infra-level observability

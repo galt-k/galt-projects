@@ -12,19 +12,19 @@
 	<artifactId>rag-service</artifactId>
 	<version>0.0.1-SNAPSHOT</version>
 	<name>rag-service</name>
-	<description>RAG pipeline service using LangChain4j, Ollama, and ChromaDB</description>
+	<description>RAG pipeline service using Spring AI, Ollama, and ChromaDB</description>
 
 	<properties>
 		<java.version>21</java.version>
-		<langchain4j.version>1.11.0</langchain4j.version>
+		<spring-ai.version>1.0.2</spring-ai.version>
 	</properties>
 
 	<dependencyManagement>
 		<dependencies>
 			<dependency>
-				<groupId>dev.langchain4j</groupId>
-				<artifactId>langchain4j-bom</artifactId>
-				<version>${langchain4j.version}</version>
+				<groupId>org.springframework.ai</groupId>
+				<artifactId>spring-ai-bom</artifactId>
+				<version>${spring-ai.version}</version>
 				<type>pom</type>
 				<scope>import</scope>
 			</dependency>
@@ -42,28 +42,35 @@
 			<artifactId>spring-boot-starter-actuator</artifactId>
 		</dependency>
 
-		<!-- LangChain4j Core -->
+		<!-- Spring AI — Ollama (chat + embedding models) -->
 		<dependency>
-			<groupId>dev.langchain4j</groupId>
-			<artifactId>langchain4j</artifactId>
+			<groupId>org.springframework.ai</groupId>
+			<artifactId>spring-ai-starter-model-ollama</artifactId>
 		</dependency>
 
-		<!-- LangChain4j Ollama (chat + embedding models) -->
+		<!-- Spring AI — ChromaDB (vector store) -->
 		<dependency>
-			<groupId>dev.langchain4j</groupId>
-			<artifactId>langchain4j-ollama-spring-boot-starter</artifactId>
+			<groupId>org.springframework.ai</groupId>
+			<artifactId>spring-ai-starter-vector-store-chroma</artifactId>
 		</dependency>
 
-		<!-- LangChain4j ChromaDB (vector store) -->
+		<!-- Spring AI — Tika document reader (for loading .md files) -->
 		<dependency>
-			<groupId>dev.langchain4j</groupId>
-			<artifactId>langchain4j-chroma</artifactId>
+			<groupId>org.springframework.ai</groupId>
+			<artifactId>spring-ai-tika-document-reader</artifactId>
 		</dependency>
 
-		<!-- Document parsing -->
+		<!-- AOP — required for Resilience4j annotations (@CircuitBreaker, @TimeLimiter, etc.) -->
 		<dependency>
-			<groupId>dev.langchain4j</groupId>
-			<artifactId>langchain4j-document-parser-apache-tika</artifactId>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-aop</artifactId>
+		</dependency>
+
+		<!-- Resilience4j — circuit breaker, retry, timeout, bulkhead, rate limiter -->
+		<dependency>
+			<groupId>io.github.resilience4j</groupId>
+			<artifactId>resilience4j-spring-boot3</artifactId>
+			<version>2.3.0</version>
 		</dependency>
 
 		<!-- Test -->

@@ -267,7 +267,7 @@ The `traceId` is identical across all three services. This means:
 | RAG pipeline (Week 2) | ✅ Done | LangChain4j + Ollama + ChromaDB |
 | Database query spans | ❌ Future | Need JDBC/JPA instrumentation dependency |
 | Structured JSON logging | ❌ Future | Need logstash-logback-encoder + logback-spring.xml |
-| Telemetry ingestion (Week 3) | ❌ Future | Pull traces from Jaeger API → embed into ChromaDB |
+| Telemetry ingestion (Week 3) | ✅ Done | JaegerClient → TelemetryIngestionService → ChromaDB |
 
 ---
 
@@ -432,13 +432,889 @@ The pattern is the same regardless of what you embed. Start with docs → add tr
 
 **Week 1:** We built microservices with distributed tracing → traces exported to Jaeger.
 
-**Week 2 (now):** We built a RAG pipeline that answers questions about the system → using project documentation.
+**Week 2:** We built a RAG pipeline that answers questions about the system → using project documentation.
 
-**Week 3 (next):** We'll connect the two — pull traces from Jaeger's API, chunk them, embed them into ChromaDB, and answer questions like:
+**Week 3 (done):** We connected the two. `JaegerClient` pulls traces from Jaeger's REST API, `TelemetryIngestionService` converts them to human-readable narratives, chunks them, and embeds them into ChromaDB. Now you can ask:
 - "Why was the last order slow?" → retrieves actual trace data showing the slow span
 - "Which service has the most errors this hour?" → retrieves error spans and summarizes
 - "What pattern do payment failures follow?" → retrieves error traces and finds commonalities
 
-**This is the full vision:** observability data (traces, logs, metrics) becomes queryable through natural language. Instead of writing PromQL queries or Jaeger search filters, you ask a question and the RAG pipeline finds the relevant telemetry and explains it.
+**This is the full vision realized:** observability data (traces) is now queryable through natural language. Instead of writing Jaeger search filters, you ask a question and the RAG pipeline finds the relevant telemetry and explains it.
 
 **Instrument for the questions you want to answer.**
+
+---
+
+## Q: How does telemetry ingestion (Week 3) work?
+
+Three new components make this possible:
+
+**1. `JaegerClient`** — HTTP client that talks to Jaeger's REST API:
+- `GET /api/services` → discovers all traced services (product-service, order-service, payment-service)
+- `GET /api/traces?service=X&lookback=1h&limit=20` → fetches recent traces per service
+- Skips Jaeger's own internal services (jaeger-query, jaeger-all-in-one)
+- Uses Spring's `RestClient` (not the auto-configured Builder — this client doesn't need tracing on itself)
+
+**2. `TelemetryIngestionService`** — The core conversion layer:
+- Receives raw Jaeger trace JSON (traceID, spans array, processes map)
+- Parses each span: operation name, service name, duration, parent-child relationships, tags, error status
+- Converts the full trace into a **human-readable narrative** (not raw JSON)
+- Attaches rich metadata: traceId, rootService, rootOperation, durationMs, spanCount, hasErrors
+- Adds performance annotations for slow traces (>500ms) identifying the bottleneck
+- Adds error summaries for traces with failures
+
+**3. `POST /ingest/traces` endpoint** — Takes optional `lookback` and `limit` parameters
+
+**Why human-readable narratives instead of raw JSON?**
+
+LLMs understand prose far better than nested JSON. Compare:
+
+Raw JSON span: `{"operationName":"GET","duration":15234,"tags":[{"key":"http.status_code","value":"200"}]}`
+
+Human-readable: `[product-service] GET /products/1  (15ms)\n  http.status_code: 200`
+
+The narrative format means the LLM can directly reason about what happened, identify patterns, and explain problems in natural language. Raw JSON would require the LLM to parse structure before reasoning.
+
+---
+
+## Q: Why chunk per-trace and not per-span?
+
+This was the most important chunking decision for telemetry.
+
+**Per-span chunking (rejected):**
+- "GET /products/1 took 15ms" — so what? Is that slow? For what request? What happened before and after?
+- A span without its trace context is like a sentence without its paragraph — technically valid but meaningless
+
+**Per-trace chunking (chosen):**
+- "Order creation: 400ms total. Validation: 50ms (2 product lookups at 15ms each). Payment: 170ms (150ms simulated delay). All services responded. No errors."
+- The trace tells a complete request story — who called whom, how long each step took, where the bottleneck is
+
+**Per-service chunking (considered but not chosen):**
+- Would group all spans from one service together
+- Loses the cross-service narrative — the whole point of distributed tracing
+- Might be useful for "show me all product-service activity" queries, but that's a metadata filter, not a semantic search
+
+**The trade-off:** Per-trace documents can be large (2000+ chars for a trace with 10 spans). We compensate with larger chunk size (1500/300 vs 1000/200 for docs) to keep most traces within 1-2 chunks.
+
+---
+
+## Q: Why are trace chunks larger than documentation chunks?
+
+**Docs: 1000 chars, 200 overlap**
+- Prose paragraphs are self-contained at ~1000 chars
+- Natural breakpoints exist (paragraphs, headings)
+- Smaller chunks = more precise retrieval for conceptual questions
+
+**Traces: 1500 chars, 300 overlap**
+- A trace with 8 spans is typically 1500-2500 chars
+- The span breakdown is a single logical unit — splitting mid-trace loses context
+- Larger chunks keep most traces in 1-2 chunks rather than fragmenting across 3-4
+- 300-char overlap ensures span data at chunk boundaries isn't lost
+
+---
+
+## Q: What metadata do trace documents carry?
+
+Each trace document in ChromaDB has these metadata fields:
+
+| Field | Type | Example | Purpose |
+|-------|------|---------|---------|
+| `source` | String | `"jaeger-trace"` | Distinguishes traces from docs |
+| `traceId` | String | `"abc123def456"` | Unique trace identifier |
+| `rootService` | String | `"order-service"` | Which service received the initial request |
+| `rootOperation` | String | `"POST /orders"` | The entry-point operation |
+| `durationMs` | Integer | `385` | Total trace duration in milliseconds |
+| `spanCount` | Integer | `11` | Number of spans in the trace |
+| `hasErrors` | String | `"true"/"false"` | Whether any span had an error |
+| `type` | String | `"telemetry"` | Data type marker for filtering |
+
+This metadata enables future improvements: filter by service, find only error traces, find traces slower than a threshold. Currently used for provenance — the RAG prompt tells the LLM to distinguish documentation context from telemetry context.
+
+---
+
+# Real-World Scenarios: OTel Collector, GenAI, and Production Observability
+
+Everything above focuses on our learning project. This section covers how these patterns scale to **real production systems** — especially the role of the **OpenTelemetry Collector** and how **GenAI/RAG** fits into the observability stack.
+
+---
+
+## Q: What is the OpenTelemetry Collector and why does every production system need one?
+
+The OTel Collector is a **vendor-agnostic telemetry router**. It sits between your applications (producers) and your observability backends (consumers).
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    PRODUCTION ARCHITECTURE                          │
+│                                                                     │
+│  Team A services ──┐                                                │
+│  Team B services ──┤                                                │
+│  Team C services ──┤──OTLP──→ ┌───────────────────┐                │
+│  Team D services ──┤          │  OTel Collector    │                │
+│  Infra agents    ──┤          │                    │                │
+│  K8s metrics     ──┘          │  Receivers:        │                │
+│                               │   - OTLP (gRPC)   │                │
+│                               │   - OTLP (HTTP)   │                │
+│                               │   - Prometheus     │                │
+│                               │   - Kafka          │                │
+│                               │                    │                │
+│                               │  Processors:       │                │
+│                               │   - Batch          │──→ Jaeger/Tempo│
+│                               │   - Filter         │──→ Prometheus  │
+│                               │   - Sampling       │──→ Loki        │
+│                               │   - Attributes     │──→ S3/GCS      │
+│                               │   - K8s metadata   │──→ PagerDuty   │
+│                               │   - Tail sampling  │──→ RAG/AI svc  │
+│                               │                    │──→ Kafka topic  │
+│                               └───────────────────┘                │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Without a Collector:**
+- Every service needs to know where Jaeger, Prometheus, Loki, etc. live
+- Changing backends requires redeploying every service
+- No central place to filter, sample, or enrich
+- Cost spirals because everything is exported everywhere
+
+**With a Collector:**
+- Services send OTLP to one endpoint — done
+- Routing, sampling, enrichment all happen centrally
+- Backend migrations are config changes, not code changes
+- The Platform/SRE team owns the Collector; app teams don't care
+
+---
+
+## Q: How would the OTel Collector work with our system?
+
+**Current architecture (direct export, polling):**
+```
+product-service ──OTLP──→ Jaeger ←──poll── rag-service
+order-service   ──OTLP──→ Jaeger
+payment-service ──OTLP──→ Jaeger
+```
+
+**With Collector (fan-out, real-time):**
+```
+product-service ──OTLP──→ ┌───────────────┐ ──OTLP──→ Jaeger :4318
+order-service   ──OTLP──→ │ OTel Collector│ ──HTTP───→ rag-service :8084/ingest/trace
+payment-service ──OTLP──→ └───────────────┘
+```
+
+The Collector config (YAML) would look like:
+```yaml
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+exporters:
+  otlphttp/jaeger:
+    endpoint: http://jaeger:4318
+
+  otlphttp/rag:
+    endpoint: http://rag-service:8084/ingest/trace
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 100
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/jaeger, otlphttp/rag]
+```
+
+**What changes:**
+- Services point OTLP at Collector instead of Jaeger directly
+- Collector exports to both Jaeger AND rag-service
+- rag-service gets traces in real-time — no polling needed
+- Adding a new consumer (e.g., anomaly detection) = add one exporter line
+
+---
+
+## Q: What are the production scenarios for the OTel Collector?
+
+### Scenario 1: Multi-team platform (50+ services)
+
+```
+Team Checkout:  checkout-svc, cart-svc, pricing-svc
+Team Inventory: warehouse-svc, stock-svc, shipping-svc
+Team Payments:  payment-svc, billing-svc, refund-svc
+Team Auth:      auth-svc, user-svc, session-svc
+Team Search:    search-svc, recommend-svc, catalog-svc
+                     │
+                     ▼
+              OTel Collector (owned by Platform team)
+                     │
+          ┌──────────┼──────────┬──────────────┐
+          ▼          ▼          ▼              ▼
+       Jaeger    Prometheus    Loki       PagerDuty
+     (traces)    (metrics)   (logs)       (alerts)
+```
+
+**Why this matters:**
+- Teams instrument their services once (`micrometer-tracing-bridge-otel` in Spring Boot)
+- Platform team decides where data goes — teams don't even know
+- If Platform team migrates from Jaeger to Grafana Tempo, zero app changes
+- Each team sees only their own traces in the UI (multi-tenancy via Collector attributes)
+
+### Scenario 2: Cost control via intelligent sampling
+
+At scale, storing every trace is prohibitively expensive. A company doing 100K requests/second generates billions of spans/day.
+
+```
+All traces ──→ OTel Collector
+                  │
+                  ├── Tail Sampling Processor:
+                  │     - 100% of ERROR traces       → kept (all errors matter)
+                  │     - 100% of traces > 2 seconds  → kept (all slow requests matter)
+                  │     - 5% of successful traces     → kept (sample of normal traffic)
+                  │     - 100% of traces with custom  → kept (business-critical flows)
+                  │       attribute "payment.amount > 10000"
+                  │
+                  └── Result: 90% cost reduction, 0% loss of important data
+```
+
+**Tail sampling** is only possible with a Collector. It waits for the entire trace to complete, then decides whether to keep or drop it based on the full picture. Head sampling (at the service level) can't do this because the service doesn't know if the downstream call will fail.
+
+### Scenario 3: Data enrichment with Kubernetes metadata
+
+Services running in K8s don't know their own pod name, node, namespace, or deployment version. The Collector adds this automatically:
+
+```
+Span from service:
+  service.name: order-service
+  http.method: POST
+  http.url: /orders
+
+After Collector's k8sattributes processor:
+  service.name: order-service
+  http.method: POST
+  http.url: /orders
+  k8s.pod.name: order-service-7b4d5f6-xk2m9       ← added
+  k8s.namespace: production                          ← added
+  k8s.deployment.name: order-service                 ← added
+  k8s.node.name: ip-10-0-42-17.ec2.internal         ← added
+  cloud.region: us-east-1                            ← added
+  deployment.version: v2.3.1                         ← added
+```
+
+**Why this matters for debugging:** When order-service is slow, you can now see if it's one specific pod (memory leak), one node (noisy neighbor), or all pods (code issue). Without K8s enrichment, you just see "order-service is slow."
+
+### Scenario 4: Zero-downtime backend migration
+
+Company is migrating from Jaeger to Grafana Tempo:
+
+```
+Week 1:  Collector ──→ Jaeger (100%)
+                   ──→ Tempo (100%, shadow mode — data flows but nobody looks at it)
+
+Week 2:  Teams validate Tempo has matching traces
+         Compare: same traceId in Jaeger == same traceId in Tempo ✓
+
+Week 3:  Teams switch dashboards to Tempo
+         Collector ──→ Jaeger (still receiving, but nobody uses it)
+                   ──→ Tempo (primary)
+
+Week 4:  Collector ──→ Tempo (100%)
+         Jaeger removed.
+```
+
+**Zero code changes in any service.** The migration is purely a Collector config change. Services never knew about the switch.
+
+### Scenario 5: Multi-region with local Collectors
+
+```
+US-East Region:                        EU-West Region:
+┌─────────────────────┐                ┌─────────────────────┐
+│ services ──→ Local  │                │ services ──→ Local  │
+│             Collector──→ Central     │             Collector──→ Central
+└─────────────────────┘   Collector    └─────────────────────┘   Collector
+                              │
+                    ┌─────────┼─────────┐
+                    ▼         ▼         ▼
+                 Jaeger   Prometheus   S3 Archive
+```
+
+Local Collectors batch and compress before sending cross-region. This reduces cross-region bandwidth costs and adds resilience — if the central Collector is down, local Collectors buffer data.
+
+### Scenario 6: Compliance and data redaction
+
+In regulated industries (healthcare, finance), traces may contain PII:
+
+```
+Span: POST /api/users
+  user.email: john@example.com     ← PII!
+  user.ssn: 123-45-6789           ← PII!
+  http.url: /api/users?name=John  ← PII in URL!
+
+After Collector's attributes processor (redaction):
+  user.email: ***@***.com
+  user.ssn: ***-**-****
+  http.url: /api/users?name=***
+```
+
+The Collector can **redact sensitive fields** before data reaches any backend. Services don't need to know about compliance rules — the Collector enforces them centrally.
+
+---
+
+## Q: How does the OTel Collector enable GenAI/RAG at scale?
+
+This is where our project's architecture connects to the real world. The Collector becomes the **data pipeline** feeding AI systems.
+
+### Pattern 1: Real-time trace embedding for RAG
+
+```
+services ──→ Collector ──→ Jaeger (human visualization)
+                       ──→ RAG Service (AI embedding)
+                               │
+                               ├── Convert trace to narrative
+                               ├── Embed via LLM
+                               └── Store in vector DB
+                                      │
+                                      ▼
+                               "Why was checkout slow?"
+                               → Retrieves actual traces
+                               → LLM explains root cause
+```
+
+**Production scale consideration:** At 100K traces/day, you can't embed every trace. Use the Collector's sampling processor to send only **interesting** traces to the RAG service:
+- Error traces (always)
+- Slow traces (p99+)
+- Business-critical paths (checkout, payment)
+- Sampled normal traffic (1-5%)
+
+### Pattern 2: Anomaly detection pipeline
+
+```
+services ──→ Collector ──→ Jaeger
+                       ──→ Anomaly Detection Service
+                               │
+                               ├── Running average latency per operation
+                               ├── When current trace >> avg: flag as anomaly
+                               ├── Embed anomaly trace + context into RAG
+                               └── Generate incident summary via LLM
+                                      │
+                                      ▼
+                               Slack: "⚠️ payment-service latency spiked 10x
+                               in the last 5 minutes. 3 traces show timeout
+                               connecting to payment gateway. Similar pattern
+                               occurred on Jan 15 (resolved by gateway team).
+                               Suggested action: check gateway status page."
+```
+
+The LLM doesn't just detect the anomaly — it **correlates with past incidents** (stored in the vector DB from previous embeddings) and suggests actions. This is the "AI-powered on-call" vision.
+
+### Pattern 3: Automated incident postmortem
+
+```
+During incident:
+  Collector ──→ RAG Service (all error traces auto-embedded)
+
+After incident resolved:
+  Engineer: "Generate a postmortem for the payment outage between 2-3 PM"
+
+  RAG pipeline:
+  1. Retrieve all error traces from 2-3 PM (metadata filter: hasErrors=true, time range)
+  2. Retrieve architecture docs (how payment-service works)
+  3. Retrieve past incidents with similar patterns
+  4. LLM generates structured postmortem:
+     - Timeline of events
+     - Root cause analysis
+     - Impact assessment
+     - Similar past incidents
+     - Recommended preventive actions
+```
+
+This turns hours of manual postmortem writing into a 30-second AI-generated draft that the engineer reviews and refines.
+
+### Pattern 4: Natural language SLA monitoring
+
+```
+Product Manager: "Are we meeting our 500ms p99 SLA for checkout?"
+
+RAG pipeline:
+1. Retrieve recent checkout traces from vector DB
+2. Calculate: 95th percentile = 420ms, 99th percentile = 890ms
+3. Retrieve SLA documentation
+4. LLM: "No. Your checkout p99 is 890ms, exceeding the 500ms SLA.
+   The bottleneck is inventory-service (contributing 400ms average).
+   Traces show inventory DB queries taking 350ms when stock is low
+   (full table scan on inventory table). Recommendation: add index
+   on (product_id, warehouse_id) in inventory DB."
+```
+
+Non-technical stakeholders can query system health in plain English.
+
+### Pattern 5: Predictive failure detection
+
+```
+Collector ──→ RAG Service (continuous embedding)
+                │
+                └── LLM analyzes trace patterns over time:
+                    - "payment-service latency increasing 5% per day for last week"
+                    - "connection pool utilization at 85% and growing"
+                    - Past incident data shows: "Last time pool hit 95%, cascading failure"
+
+                    → Proactive alert: "payment-service connection pool will likely
+                      exhaust in ~3 days at current growth rate. Similar pattern
+                      preceded the Feb 3 outage. Consider increasing pool size
+                      or investigating connection leak."
+```
+
+The AI moves from **reactive** (explain what happened) to **proactive** (predict what will happen).
+
+---
+
+## Q: What data should we feed into the GenAI/RAG pipeline beyond traces?
+
+Traces are just the start. A production RAG observability system ingests multiple data types:
+
+| Data Source | What It Provides | Example Questions It Answers |
+|-------------|-----------------|------------------------------|
+| **Traces** (Jaeger/Tempo) | Request flow, latency, errors, service dependencies | "Why was this order slow?" |
+| **Metrics** (Prometheus) | CPU, memory, request rates, error rates, saturation | "Is order-service overloaded?" |
+| **Logs** (Loki/ELK) | Detailed error messages, stack traces, business events | "What exception caused this failure?" |
+| **K8s events** | Pod restarts, OOM kills, node pressure, scaling events | "Was there a deployment during the outage?" |
+| **Deployment history** (ArgoCD/Flux) | What changed, when, who deployed | "Did a recent deploy cause this regression?" |
+| **Incident history** (PagerDuty/Opsgenie) | Past incidents, resolutions, runbooks | "Has this happened before? How was it fixed?" |
+| **Architecture docs** (Confluence/Notion) | System design, dependencies, SLAs | "How is payment-service supposed to work?" |
+| **Runbooks** (wiki/docs) | Step-by-step troubleshooting guides | "How do I restart the payment gateway connection?" |
+| **Git commits** (GitHub/GitLab) | Code changes, PR descriptions, blame | "What code change caused this latency increase?" |
+| **Alerts** (Grafana/PagerDuty) | What's firing, thresholds, escalation state | "What alerts are active right now?" |
+
+**The richer the context, the better the AI's answers.** A trace alone says "payment was slow." A trace + metrics + logs + deploy history says "payment was slow because the v2.3.1 deploy introduced an N+1 query in the payment validation path, causing DB CPU to spike to 95%."
+
+---
+
+## Q: How would we architect the Collector pipeline for GenAI in production?
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                 PRODUCTION GENAI OBSERVABILITY PIPELINE                  │
+│                                                                          │
+│  ┌──────────┐     ┌───────────────────┐     ┌─────────────────────┐      │
+│  │ Services │     │   OTel Collector  │     │   STREAMING LAYER   │      │
+│  │ (OTLP)   │──→  │                   │──→  │                     │      │
+│  └──────────┘     │  Processors:      │     │   Kafka Topics:     │      │
+│                   │  - Batch          │     │   - traces.all      │      │
+│  ┌──────────┐     │  - K8s attributes │     │   - traces.errors   │      │
+│  │ K8s      │──→  │  - Tail sampling  │     │   - traces.slow     │      │
+│  │ Metrics  │     │  - PII redaction  │     │   - metrics.all     │      │
+│  └──────────┘     │  - Routing        │     │   - logs.errors     │      │
+│                   └───────────────────┘     └──────┬──────────────┘      │
+│  ┌──────────┐                                      │                     │
+│  │ Logs     │──→  (Collector)                      │                     │
+│  │ (fluentd)│                                      │                     │
+│  └──────────┘                                      │                     │
+│                                                    │                     │
+│                        ┌───────────────────────────┼──────────┐          │
+│                        │                           │          │          │
+│                        ▼                           ▼          ▼          │
+│              ┌────────────────┐          ┌──────────────┐ ┌─────────┐    │
+│              │  OBSERVABILITY │          │  AI PIPELINE │ │ALERTING │    │
+│              │  BACKENDS      │          │              │ │         │    │
+│              │                │          │  Embedding   │ │PagerDuty│    │ 
+│              │  Jaeger/Tempo  │          │  Service     │ │Slack    │    │
+│              │  Prometheus    │          │     │        │ │OpsGenie │    │
+│              │  Loki          │          │     ▼        │ └─────────┘    │
+│              │  Grafana       │          │  Vector DB   │                │
+│              └────────────────┘          │  (Weaviate/  │                │
+│                                          │   Pinecone)  │                │
+│                                          │     │        │                │
+│                                          │     ▼        │                │
+│                                          │  RAG Engine  │                │
+│                                          │  + LLM       │                │
+│                                          │     │        │                │
+│                                          │     ▼        │                │
+│                                          │  AI Agent    │                │
+│                                          │  (chat,      │                │
+│                                          │   postmortem,│                │
+│                                          │   anomaly    │                │
+│                                          │   detection) │                │
+│                                          └──────────────┘                │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key architectural decisions:**
+
+1. **Kafka between Collector and AI** — Decouples ingestion rate from embedding rate. If the LLM is slow, Kafka buffers. If the LLM is down, no data loss.
+
+2. **Separate Kafka topics** by signal type and priority — `traces.errors` gets processed immediately; `traces.all` can be sampled.
+
+3. **Vector DB choice matters at scale** — ChromaDB is fine for learning. Production needs Weaviate, Pinecone, or pgvector for durability, authentication, multi-tenancy, and billions of vectors.
+
+4. **LLM choice matters at scale** — Ollama is free for local. Production needs to balance cost vs quality:
+   - Embeddings: `text-embedding-3-small` (OpenAI) or self-hosted `nomic-embed-text`
+   - Chat: GPT-4o for complex reasoning, GPT-4o-mini for simple queries, or self-hosted Llama for data privacy
+
+---
+
+## Q: What are the Collector deployment patterns?
+
+### Pattern 1: Sidecar (per-pod)
+
+```
+┌──────────────────────────┐
+│  Kubernetes Pod          │
+│  ┌──────────┐ ┌────────┐ │
+│  │ App      │→│ OTel   │ │──→ Central Collector
+│  │ Container│ │Sidecar │ │
+│  └──────────┘ └────────┘ │
+└──────────────────────────┘
+```
+
+- Every pod gets its own Collector sidecar
+- Collects traces, metrics, and logs from the app container
+- Forwards to a central Collector
+- **Pros:** Isolation, per-pod buffering, app doesn't need to know about backends
+- **Cons:** Resource overhead per pod (100-200MB per sidecar)
+
+### Pattern 2: DaemonSet (per-node)
+
+```
+┌─────────────────────────────────────┐
+│  Kubernetes Node                    │
+│  ┌──────┐ ┌──────┐ ┌──────┐         │
+│  │Pod A │ │Pod B │ │Pod C │         │
+│  └──┬───┘ └──┬───┘ └──┬───┘         │
+│     └────────┼────────┘             │
+│              ▼                      │
+│     ┌────────────────┐              │
+│     │ OTel Collector │──→ Central   │
+│     │ (DaemonSet)    │   Collector  │
+│     └────────────────┘              │
+└─────────────────────────────────────┘
+```
+
+- One Collector per K8s node
+- All pods on the node send to the same Collector
+- **Pros:** Less resource overhead than sidecar, can collect node-level metrics
+- **Cons:** Noisy neighbor if one pod floods the Collector
+
+### Pattern 3: Gateway (centralized)
+
+```
+Pod A ──OTLP──→ ┌───────────────────┐
+Pod B ──OTLP──→ │  OTel Collector   │──→ Backends
+Pod C ──OTLP──→ │  (Deployment,     │
+Pod D ──OTLP──→ │   2-3 replicas,   │
+Pod E ──OTLP──→ │   load balanced)  │
+                └───────────────────┘
+```
+
+- Single centralized Collector behind a load balancer
+- All services send directly to it
+- **Pros:** Simplest setup, easiest to manage, central processing
+- **Cons:** Single point of failure (mitigated with replicas), can be bottleneck at very high scale
+
+### Production recommendation:
+
+**DaemonSet (nodes) → Gateway (central)** is the most common production pattern:
+
+```
+Pods ──→ Node DaemonSet Collector ──→ Gateway Collector ──→ Backends
+         (collects + buffers)        (processes + routes)    (stores)
+```
+
+---
+
+## Q: How do you handle the Collector in Docker Compose (for local dev)?
+
+For our project, adding a Collector to Docker Compose would look like:
+
+```yaml
+otel-collector:
+  image: otel/opentelemetry-collector-contrib:latest
+  ports:
+    - "4318:4318"     # OTLP HTTP receiver
+    - "4317:4317"     # OTLP gRPC receiver
+  volumes:
+    - ./otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml
+  depends_on:
+    - jaeger
+```
+
+Services would change their OTLP endpoint from `http://jaeger:4318` to `http://otel-collector:4318`. One config change per service.
+
+The Collector config file defines the full pipeline — receivers, processors, exporters — and can be changed without restarting any service.
+
+---
+
+## Q: What are the real pitfalls and lessons learned with OTel Collector in production?
+
+### Pitfall 1: Collector as bottleneck
+
+If 200 services send traces to one Collector and it can't keep up:
+- Traces get buffered in memory → Collector OOM kills → data loss
+- **Fix:** Multiple Collector replicas behind a load balancer, or DaemonSet pattern
+
+### Pitfall 2: Tail sampling requires memory
+
+Tail sampling holds traces in memory until they're "complete." If a trace has spans arriving over 30 seconds:
+- Collector needs to buffer 30 seconds of all traces in memory
+- At 10K traces/second, that's 300K traces in memory
+- **Fix:** Set `decision_wait` to a reasonable timeout (5-10s), accept that very long traces may be sampled incorrectly
+
+### Pitfall 3: Configuration complexity
+
+Collector config can get extremely complex with 10+ exporters, 5 processors, multiple pipelines:
+```yaml
+service:
+  pipelines:
+    traces/important:
+      receivers: [otlp]
+      processors: [tail_sampling, k8sattributes, batch]
+      exporters: [otlphttp/tempo, otlphttp/rag, debug]
+    traces/all:
+      receivers: [otlp]
+      processors: [head_sampling/10pct, batch]
+      exporters: [otlphttp/tempo]
+    metrics:
+      receivers: [otlp, prometheus]
+      processors: [batch, filter/dropinternal]
+      exporters: [prometheusremotewrite]
+    logs:
+      receivers: [otlp, filelog]
+      processors: [batch, attributes/addregion]
+      exporters: [loki]
+```
+- **Fix:** Version control the config, use CI/CD to deploy, test config changes in staging first
+
+### Pitfall 4: Cardinality explosion
+
+Services add high-cardinality attributes (user IDs, session tokens, request bodies):
+- These inflate metric labels → Prometheus cardinality explosion → OOM
+- These inflate trace storage → 10x cost increase
+- **Fix:** Use the Collector's `attributes` processor to drop or redact high-cardinality fields before they reach backends
+
+### Pitfall 5: Not monitoring the Collector itself
+
+The Collector is critical infrastructure. If it's down, you lose all observability:
+- **Fix:** The Collector exposes its own metrics (queue size, dropped spans, exporter errors). Monitor these with a separate, simple monitoring path that doesn't go through the Collector.
+
+---
+
+## Q: How would an AI-powered on-call assistant work end-to-end?
+
+This is the ultimate vision — combining everything in this document:
+
+```
+1. Alert fires:
+   PagerDuty → "payment-service error rate > 5% for 5 minutes"
+
+2. AI Agent activates:
+   - Retrieves error traces from last 10 min (via RAG/vector DB)
+   - Retrieves payment-service architecture docs (via RAG/vector DB)
+   - Retrieves past incidents with similar pattern (via RAG/vector DB)
+   - Checks current K8s pod status (via MCP server)
+   - Checks recent deployments (via MCP server → ArgoCD)
+   - Checks Prometheus metrics (via MCP server)
+
+3. AI generates initial assessment:
+   "payment-service error rate spiked at 2:14 AM.
+
+   Traces show: ConnectionRefusedException to payment-gateway.stripe.com:443
+   started at 2:13:47 AM. All 47 error traces have the same root cause.
+
+   K8s status: 3/3 pods running, no restarts, memory/CPU normal.
+   No deployments in last 24 hours.
+
+   This matches the pattern from the Jan 15 incident (INC-2847), which was
+   caused by Stripe's us-east-1 outage. Resolution was: wait for Stripe
+   to recover, enable circuit breaker to fail fast.
+
+   Recommended actions:
+   1. Check Stripe status page: https://status.stripe.com
+   2. Enable circuit breaker: set PAYMENT_CIRCUIT_BREAKER_ENABLED=true
+   3. If Stripe is down, set up payment retry queue
+
+   Confidence: HIGH (47/47 traces show identical external dependency failure)"
+
+4. On-call engineer reviews, confirms, takes action in minutes instead of hours.
+```
+
+**What makes this possible:**
+- OTel Collector feeding traces to the RAG pipeline in real-time
+- Vector DB with embedded traces, docs, runbooks, and past incidents
+- MCP servers for live system access (K8s, Prometheus, deploy tools)
+- LLM that can reason across all these data sources
+
+**What we've built so far:**
+- ✅ Microservices with distributed tracing (Week 1)
+- ✅ RAG pipeline with documentation (Week 2)
+- ✅ Telemetry ingestion from Jaeger (Week 3)
+- ✅ RAG precision + Resilience4j circuit breaker (Week 4)
+- 🔲 OTel Collector for real-time fan-out (future)
+- 🔲 MCP servers for live system access (future)
+- 🔲 Multi-source ingestion (logs, metrics, K8s events) (future)
+- 🔲 Anomaly detection and proactive alerting (future)
+
+Each step in this project builds toward that vision. The foundation is solid.
+
+---
+
+## Q: Why does the RAG service need Resilience4j? What fails without it?
+
+The rag-service makes external calls to **three dependencies**: Ollama (LLM + embeddings), ChromaDB (vector store), and Jaeger (trace source). Any of these can fail independently.
+
+**Without Resilience4j — what happens when Ollama goes down:**
+
+```
+User: POST /ask {"question": "Why was the last order slow?"}
+  ↓
+RagQueryService.ask()
+  ↓
+contentRetriever.retrieve() → Ollama /api/embed → TIMEOUT (120 seconds!)
+  ↓
+HTTP 500 Internal Server Error
+
+Every subsequent request waits 120 seconds and fails the same way.
+100 users = 100 threads blocked for 120 seconds each = thread pool exhaustion.
+```
+
+**With Resilience4j — same scenario:**
+
+```
+User: POST /ask {"question": "Why was the last order slow?"}
+  ↓
+RagQueryService.ask()
+  ↓
+contentRetriever.retrieve() → Ollama /api/embed → try-catch → graceful error message (instant)
+  ↓
+HTTP 200 {"answer": "Unable to retrieve context... Ollama is unavailable... will auto-recover."}
+
+If the embedding succeeded but Ollama chat is slow:
+  ↓
+ollamaChatService.call() → @CircuitBreaker → after 5 failures → OPEN
+  ↓
+Next requests: CallNotPermittedException → instant fallback (raw chunks returned)
+  ↓
+No thread blocking. No thread pool exhaustion. Users get useful partial answers.
+```
+
+---
+
+## Q: Why is the circuit breaker on a separate bean (OllamaChatService)?
+
+This is the most subtle bug in Spring resilience patterns. It's caused by **Spring AOP proxy behavior**.
+
+**The problem — self-call bypass:**
+
+```java
+@Service
+public class RagQueryService {
+
+    public String ask(String question) {
+        // ... retrieve context ...
+        return this.callLlm(prompt, context);  // ← SELF-CALL via 'this'
+    }
+
+    @CircuitBreaker(name = "ollamaChat", fallbackMethod = "callFallback")
+    public String callLlm(String prompt, String context) {
+        return chatModel.chat(prompt);  // ← Circuit breaker is SILENTLY IGNORED
+    }
+}
+```
+
+Spring AOP works by creating a **proxy wrapper** around your bean. When another bean calls your method, it goes through the proxy → Resilience4j intercepts it. But when you call a method on `this` within the same class, you bypass the proxy entirely:
+
+```
+External caller → Proxy(RagQueryService) → @CircuitBreaker → callLlm()  ✅ Works
+         this → callLlm()  ← Proxy NOT involved → @CircuitBreaker ignored  ❌ Silent fail
+```
+
+**The fix — separate bean:**
+
+```java
+@Service
+public class OllamaChatService {  // ← SEPARATE BEAN = separate proxy
+
+    @CircuitBreaker(name = "ollamaChat", fallbackMethod = "callFallback")
+    public String call(String prompt, String context) {
+        return chatModel.chat(prompt);  // ← Now protected by circuit breaker
+    }
+}
+
+@Service
+public class RagQueryService {
+    private final OllamaChatService ollamaChatService;  // ← injected = goes through proxy
+
+    public String ask(String question) {
+        // ... retrieve context ...
+        return ollamaChatService.call(prompt, context);  // ← PROXY call → CB works ✅
+    }
+}
+```
+
+**This is not a Resilience4j problem — it's a Spring AOP fundamental.** The same issue affects `@Transactional`, `@Cacheable`, `@Async`, and any other annotation-based AOP feature. If you call `this.transactionalMethod()` from within the same class, the transaction boundary is silently ignored.
+
+**Rule of thumb:** If a method needs an AOP annotation to work correctly, it should be on a **different bean** than its caller.
+
+---
+
+## Q: Why is the circuit breaker only on the chat call, not the embedding call?
+
+The `/ask` flow has two Ollama calls:
+
+```
+ask(question)
+  ├── contentRetriever.retrieve()  → Ollama /api/embed (embed query) + ChromaDB (search)
+  └── ollamaChatService.call()     → Ollama /api/chat  (generate answer)
+```
+
+**Why the embedding call doesn't get a circuit breaker:**
+
+1. **We don't own the call.** The embedding happens inside LangChain4j's `EmbeddingStoreContentRetriever`. We'd have to wrap or extend the retriever to add a circuit breaker — complex for marginal benefit.
+
+2. **A try-catch is simpler and sufficient.** If embedding fails, we have no context to work with at all. There's no useful fallback — you can't answer a question without any retrieved context. A simple try-catch returns a clear error message.
+
+3. **The circuit breaker's value is in the chat call.** The chat call is the expensive one (10-30 seconds per call). If Ollama is slow but not dead, the circuit breaker prevents thread pool exhaustion by failing fast after detecting a pattern of slow calls. The embedding call is fast (<1 second) so slow-call protection isn't needed.
+
+4. **Both calls fail to the same dependency (Ollama).** If Ollama is completely down, the embedding call fails first (before we even reach the chat call). The circuit breaker on the chat call handles the case where Ollama is degraded — slow responses, intermittent failures — which is actually the harder case to handle.
+
+---
+
+## Q: What are the circuit breaker states and how do transitions work?
+
+```
+                    ┌──────────┐
+                    │  CLOSED  │ ← Normal operation. All calls go through.
+                    │          │   Tracking: count failures in sliding window.
+                    └────┬─────┘
+                         │
+           failure rate >= 50% OR slow call rate >= 80%
+                         │
+                         ▼
+                    ┌──────────┐
+                    │   OPEN   │ ← Ollama is considered down. All calls instantly rejected.
+                    │          │   CallNotPermittedException → fallback (raw chunks).
+                    │          │   No network call made. No thread blocked.
+                    └────┬─────┘
+                         │
+                  after 30 seconds (waitDurationInOpenState)
+                         │
+                         ▼
+                    ┌──────────┐
+                    │HALF_OPEN │ ← Testing if Ollama recovered. 3 calls permitted.
+                    │          │   If majority succeed → back to CLOSED.
+                    │          │   If they fail → back to OPEN for another 30s.
+                    └──────────┘
+```
+
+**Our specific configuration and why:**
+
+| Parameter | Value | Why |
+|-----------|-------|-----|
+| `slidingWindowType` | COUNT_BASED | Evaluate the last N calls, not a time window. Simpler to reason about. |
+| `slidingWindowSize` | 10 | Look at the last 10 calls. Small enough to react quickly, large enough to avoid false positives from a single timeout. |
+| `minimumNumberOfCalls` | 5 | Don't evaluate until at least 5 calls. Prevents tripping on the first few requests at startup. |
+| `failureRateThreshold` | 50% | If 5 out of 10 calls fail, Ollama is probably down. |
+| `slowCallDurationThreshold` | 25s | A call taking >25s is "slow." Ollama is overloaded or degraded. |
+| `slowCallRateThreshold` | 80% | If 8 out of 10 calls are slow, trip the breaker. Don't trip on occasional slowness. |
+| `waitDurationInOpenState` | 30s | Wait 30s before trying again. Ollama might restart in ~30s. |
+| `permittedNumberOfCallsInHalfOpenState` | 3 | Try 3 calls to confirm recovery. More reliable than a single test call. |
+| `timeoutDuration` | 30s | No single call should take more than 30s. Was 120s — lowered to match breaker config. |

@@ -23,6 +23,8 @@ spec:
           env:
             - name: RAG_CHROMA_BASE-URL
               value: "http://chromadb:8000"
+            - name: RAG_JAEGER_API-URL
+              value: "http://jaeger:16686"
             - name: LANGCHAIN4J_OLLAMA_CHAT-MODEL_BASE-URL
               value: "http://ollama:11434"
             - name: LANGCHAIN4J_OLLAMA_EMBEDDING-MODEL_BASE-URL
