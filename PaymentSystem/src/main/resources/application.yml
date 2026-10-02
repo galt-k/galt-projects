@@ -1,0 +1,84 @@
+server:
+  port: 8080
+  threads:
+    virtual:
+      enabled: true
+  tomcat:
+    accept-count: 2000
+    max-connections: 10000
+    connection-timeout: 20s
+
+spring:
+  kafka:
+    # Address of the kafka brokers
+    bootstrap-serers: localhost:9092
+
+    #2 producer configuration
+    producer:
+      key-serializer: org.apache.kafka.comon.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: all
+      properties:
+        enable.idempotence: true
+        linger.ms: 5
+        batch.size: 32768
+        compression.type: zstd
+        buffer.memory: 67108864
+        max.block.ms: 3000
+
+    # Consumer config
+    consumer:
+      group-id: payment-db-writer-group
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-desrializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      max.poll.records: 500
+      properties:
+        spring.json.trusted.packages: "*" # Allows JSON deserialization into your DTO package
+        spring.json.value.default.type: "org.examaple.dto.PaymentItem"
+    listener:
+      type: batch
+      ack-mode: manual
+  datasource:
+    url: jdbc:postgresql://localhost:5432/db_name
+    username: your_username
+    password: your_password
+    driver-class-name: org.postgresql.Driver
+
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+      connection-timeout: 3000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+
+# Observability
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      show-details: when_authorized
+  metrics:
+    tags:
+      application: payment-ingestion
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+
+logging:
+  level:
+    root: INFO
+    org.springframework.web: INFO
+    ord.hibernate.SQl: WARN
+    org.hibernate.orm.jdbc.bind: WARN
