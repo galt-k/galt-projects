@@ -39,6 +39,22 @@ public class CachedTransformerBlock {
         return x;
     }
 
+    public Tensor prefillDelta(Tensor x, int[] blockTable, int cachedTokenCount, PagedKVCache cache, int layer) {
+        // Attention + shortcut
+        Tensor shortcut = x;
+        x = norm1.forward(x);
+        x = att.prefillDelta(x, blockTable, cachedTokenCount, cache, layer);
+        x = shortcut.add(x);
+
+        // FeedForward + shortcut
+        shortcut = x;
+        x = norm2.forward(x);
+        x = ff.forward(x);
+        x = shortcut.add(x);
+
+        return x;
+    }
+
     public Tensor decodeStep(Tensor x, int pos, int[] blockTable, PagedKVCache cache, int layer) {
         // Attention + shortcut
         Tensor shortcut = x;

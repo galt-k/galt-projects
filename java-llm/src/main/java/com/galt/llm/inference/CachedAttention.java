@@ -5,9 +5,10 @@ import com.galt.llm.Tensor;
 /**
  * Stateful Attention module supporting Grouped-Query Attention (GQA) and paged KV caching.
  * <p>
- * Supports two distinct execution paths:
+ * Supports three distinct execution paths:
  * 1. prefill: Parallel multi-token prompt processing with causal masking and cache population.
- * 2. decodeStep: Zero-allocation single-token decode using FlashPagedAttention over cached blocks.
+ * 2. prefillDelta: Rectangular delta-prefill attention reusing cached prefix blocks with zero recomputation.
+ * 3. decodeStep: Zero-allocation single-token decode using FlashPagedAttention over cached blocks.
  */
 public class CachedAttention {
     private final Tensor wQuery;
@@ -193,6 +194,69 @@ public class CachedAttention {
         Tensor context = weights.matmul(vExpanded); // [B, numQHeads, T, headDim]
         context = context.transpose(1, 2).contiguous().view(B, T, numQHeads * headDim);
 
+        Tensor projected = context.matmul(outProj);
+        if (bOutProj != null) {
+            projected = projected.addBias(bOutProj);
+        }
+        return projected;
+    }
+
+    /**
+     * Executes rectangular delta-prefill attention reusing cached prefix blocks:
+     * 1. Projects Q, K, V only for the newly arrived delta tokens [B, T_delta, embDim].
+     * 2. Writes new K and V rows into PagedKVCache starting at pos = cachedTokenCount + t.
+     * 3. Runs single-pass FlashPagedAttention for each delta query row across all keys 0..pos.
+     * 4. Projects context through outProj and returns [B, T_delta, embDim].
+     */
+    public Tensor prefillDelta(Tensor xDelta, int[] blockTable, int cachedTokenCount, PagedKVCache cache, int layer) {
+        int B = xDelta.shape()[0];
+        int T_delta = xDelta.shape()[1];
+
+        Tensor Q = xDelta.matmul(wQuery);
+        if (bQuery != null) Q = Q.addBias(bQuery);
+
+        Tensor K = xDelta.matmul(wKey);
+        if (bKey != null) K = K.addBias(bKey);
+
+        Tensor V = xDelta.matmul(wValue);
+        if (bValue != null) V = V.addBias(bValue);
+
+        // Write new delta K and V rows into PagedKVCache starting at cachedTokenCount
+        int blockSize = cache.getBlockSize();
+        float[] kData = K.data();
+        float[] vData = V.data();
+
+        for (int t = 0; t < T_delta; t++) {
+            int pos = cachedTokenCount + t;
+            int logicalBlockIdx = pos / blockSize;
+            int slotOffset = pos % blockSize;
+            int physicalBlockId = blockTable[logicalBlockIdx];
+
+            for (int kvh = 0; kvh < numKvHeads; kvh++) {
+                int srcOffset = (t * numKvHeads + kvh) * headDim;
+                cache.writeKey(physicalBlockId, layer, kvh, slotOffset, kData, srcOffset);
+                cache.writeValue(physicalBlockId, layer, kvh, slotOffset, vData, srcOffset);
+            }
+        }
+
+        // Rectangular attention: For each delta query, attend across 0..(cachedTokenCount + t)
+        float[] qData = Q.data();
+        float[] contextData = new float[B * T_delta * numQHeads * headDim];
+
+        for (int b = 0; b < B; b++) {
+            for (int t = 0; t < T_delta; t++) {
+                int pos = cachedTokenCount + t;
+                float[] qRow = new float[numQHeads * headDim];
+                System.arraycopy(qData, (b * T_delta + t) * numQHeads * headDim, qRow, 0, numQHeads * headDim);
+
+                float[] attnOut = new float[numQHeads * headDim];
+                FlashPagedAttention.forwardDecode(qRow, blockTable, pos, cache, layer, numQHeads, attnOut);
+
+                System.arraycopy(attnOut, 0, contextData, (b * T_delta + t) * numQHeads * headDim, numQHeads * headDim);
+            }
+        }
+
+        Tensor context = Tensor.of(contextData, B, T_delta, numQHeads * headDim);
         Tensor projected = context.matmul(outProj);
         if (bOutProj != null) {
             projected = projected.addBias(bOutProj);

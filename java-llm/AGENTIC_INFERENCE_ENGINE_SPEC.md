@@ -47,7 +47,7 @@ Before starting Milestone 1, we treat ONLY these primitives as known:
 
 ---
 
-### Milestone 2: Zero-Copy Prefix Sharing Across Agent Turns — `RadixPrefixCache.java` [ACTIVE]
+### Milestone 2: Zero-Copy Prefix Sharing Across Agent Turns — `RadixPrefixCache.java` [COMPLETED]
 *(Stanford CS349D Lecture 3 & 8: SGLang RadixAttention)*
 - **First-Principles Problem:** Only introduce after Milestone 1 is complete. Redundant prefill computation and duplicate physical block allocation for identical system prompts and conversation histories across multi-turn agent loops.
 - **Business Implication:** Sluggish Time-To-First-Token (TTFT) and wasted GPU compute spending during long-running, multi-step agent investigations.
@@ -62,7 +62,7 @@ Before starting Milestone 1, we treat ONLY these primitives as known:
 
 ---
 
-### Milestone 3: Deterministic Grammar & Schema Enforcement — `FSMLogitMasker.java`
+### Milestone 3: Deterministic Grammar & Schema Enforcement — `FSMLogitMasker.java` [ACTIVE]
 *(Outlines & XGrammar Pushdown/FSM Bitmask Compilation)*
 - **First-Principles Problem:** Only introduce after Milestone 2 is complete. Syntax failures and JSON schema violations resulting from unconstrained stochastic token selection during structured agent tool calls.
 - **Business Implication:** Downstream parser crashes, broken automated microservice integrations, and expensive error-handling retry loops.
@@ -328,6 +328,17 @@ int EXPECTED_SELECTED_NODE_ID = 2;
 
 ---
 
-### Ready to Begin Milestone 2 — Step A (Top-Down First-Principles Kickoff)
+### Ready to Begin Milestone 3 — Step A (Top-Down First-Principles Kickoff)
 
-With Milestone 1 100% complete and verified, we are officially unlocked into **Milestone 2: Zero-Copy Prefix Sharing Across Agent Turns (`RadixPrefixCache.java`)**.
+With Milestones 1 and 2 100% complete and verified, we are officially unlocked into **Milestone 3: Deterministic Grammar & Schema Enforcement (`FSMLogitMasker.java`)**.
+
+## 6. Execution Progress Log
+- **Milestone 1 (`PagedKVCache`, `FlashPagedAttention`, `CachedAttention`, `CachedTransformerBlock`, `CachedGPTModel`):**
+  - **Status:** `[COMPLETED]` (Commit `b1d9d995`, All 46 tests passing).
+  - **Key Invariants Verified:** Single-pass streaming online softmax (`FlashInfer`) matches two-pass reference within `1e-6f`; end-to-end `CachedGPTModel` autoregressive decoding matches stateless Chapter 4 `GPTModel` within `1e-5f`.
+- **Milestone 2 (`RadixPrefixCache` & Rectangular Delta-Prefill Attention):**
+  - **Status:** `[COMPLETED]` (All 49 tests passing).
+  - **Key Invariants Verified:** Multi-turn prefix reuse with zero-copy reference counting; LRU leaf eviction protecting active / ancestor blocks; rectangular `prefillDelta` logits exactly match full prefill from scratch within `1e-5f` (`RadixPrefixCacheTest.java`).
+- **Milestone 3 (`FSMLogitMasker`):**
+  - **Status:** `[ACTIVE]`
+  - **Step A Design Commencing:** Constrained decoding, finite state machine (FSM) schema transition tables, and bitmask logit filtering.

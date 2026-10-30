@@ -8,7 +8,8 @@ import com.galt.llm.Tensor;
  * <p>
  * Implements:
  * 1. prefill: Parallel multi-token prompt processing with causal masking and KV block allocation.
- * 2. decodeStep: Zero-allocation single-token decode using absolute position embedding and FlashPagedAttention.
+ * 2. prefillDelta: Rectangular delta-prefill attention reusing cached prefix blocks with zero recomputation.
+ * 3. decodeStep: Zero-allocation single-token decode using absolute position embedding and FlashPagedAttention.
  */
 public class CachedGPTModel {
     private final InferenceConfig config;
@@ -61,6 +62,40 @@ public class CachedGPTModel {
 
         x = finalLayerNorm.forward(x);
         return x.matmul(outHead); // shape: [B, T, vocabSize]
+    }
+
+    /**
+     * Executes delta-prefill for a prompt where the first cachedTokenCount tokens are already cached:
+     * 1. Slices delta tokens from inIdx (pos = cachedTokenCount .. T-1).
+     * 2. Looks up tokenEmb[token] + posEmb[cachedTokenCount + t] (using absolute sequence positions!).
+     * 3. Runs through all CachedTransformerBlocks using prefillDelta.
+     * 4. Emits logits for the delta tokens [B, T_delta, vocabSize].
+     */
+    public Tensor prefillDelta(int[][] inIdx, int[] blockTable, int cachedTokenCount, PagedKVCache cache) {
+        int B = inIdx.length;
+        int T = inIdx[0].length;
+        int T_delta = T - cachedTokenCount;
+        int D = config.embDim();
+
+        Tensor x = Tensor.zeros(B, T_delta, D);
+        for (int b = 0; b < B; b++) {
+            for (int t = 0; t < T_delta; t++) {
+                int absPos = cachedTokenCount + t;
+                int tokenID = inIdx[b][absPos];
+                for (int d = 0; d < D; d++) {
+                    float tokVal = tokenEmb.get(tokenID, d);
+                    float posVal = posEmb.get(absPos, d);
+                    x.set(tokVal + posVal, b, t, d);
+                }
+            }
+        }
+
+        for (int layer = 0; layer < blocks.length; layer++) {
+            x = blocks[layer].prefillDelta(x, blockTable, cachedTokenCount, cache, layer);
+        }
+
+        x = finalLayerNorm.forward(x);
+        return x.matmul(outHead); // shape: [B, T_delta, vocabSize]
     }
 
     /**
