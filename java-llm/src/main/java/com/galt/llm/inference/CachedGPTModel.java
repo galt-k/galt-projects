@@ -12,6 +12,10 @@ import com.galt.llm.Tensor;
  * 3. decodeStep: Zero-allocation single-token decode using absolute position embedding and FlashPagedAttention.
  */
 public class CachedGPTModel {
+    public InferenceConfig config() {
+        return config;
+    }
+
     private final InferenceConfig config;
     private final Tensor tokenEmb;
     private final Tensor posEmb;

@@ -16,6 +16,8 @@ public class PagedKVCache {
     private final float[] keyData;
     private final float[] valueData;
     private final ArrayDeque<Integer> freeBlocks;
+    // Physical ownership counts, separate from RadixPrefixCache node references.
+    private final int[] refCounts;
 
     public PagedKVCache(int numBlocks,
                         int numLayers,
@@ -37,6 +39,7 @@ public class PagedKVCache {
 
         this.keyData = new float[numBlocks * this.blockStride];
         this.valueData = new float[numBlocks * this.blockStride];
+        this.refCounts = new int[numBlocks];
 
         this.freeBlocks = new ArrayDeque<>(numBlocks);
         for (int i = 0; i < numBlocks; i++) {
@@ -57,26 +60,64 @@ public class PagedKVCache {
         if (freeBlocks.isEmpty()) {
             throw new IllegalStateException("Out of KV cache physical blocks: pool exhausted");
         }
-        return freeBlocks.pop();
+        int blockId = freeBlocks.pop();
+        refCounts[blockId] = 1;
+        return blockId;
+    }
+
+    /** Adds one owner to an allocated block. Calls must be externally serialized. */
+    public void retainBlock(int blockId) {
+        checkBlockId(blockId);
+        if (refCounts[blockId] == 0) {
+            throw new IllegalStateException("Cannot retain a free block: " + blockId);
+        }
+        if (refCounts[blockId] == Integer.MAX_VALUE) {
+            throw new IllegalStateException("Reference count overflow for block: " + blockId);
+        }
+        refCounts[blockId]++;
+    }
+
+    /** Returns physical ownership count; free blocks have count zero. */
+    public int getRefCount(int blockId) {
+        checkBlockId(blockId);
+        return refCounts[blockId];
+    }
+
+    /** Copies all layers, KV heads, and slots into an exclusively owned block. */
+    public void copyBlock(int sourceBlockId, int destinationBlockId) {
+        checkBlockId(sourceBlockId);
+        checkBlockId(destinationBlockId);
+        if (refCounts[sourceBlockId] == 0 || refCounts[destinationBlockId] != 1) {
+            throw new IllegalStateException("Copy requires an allocated source and an exclusive destination");
+        }
+        System.arraycopy(keyData, sourceBlockId * blockStride,
+                keyData, destinationBlockId * blockStride, blockStride);
+        System.arraycopy(valueData, sourceBlockId * blockStride,
+                valueData, destinationBlockId * blockStride, blockStride);
+    }
+
+    private void checkBlockId(int blockId) {
+        if (blockId < 0 || blockId >= numBlocks) {
+            throw new IllegalArgumentException("Invalid blockId: " + blockId);
+        }
     }
 
     /**
-     * Releases a physical block back to the pool of free blocks.
+     * Releases one owner. Returns the block to the free pool only at count zero.
      *
      * @param blockId the physical block ID to release
      * @throws IllegalArgumentException if blockId is out of bounds [0, numBlocks - 1]
-     * @throws IllegalStateException    if blockId is already present in the free pool (double-free)
+     * @throws IllegalStateException if blockId has no owners (double-free)
      */
     public void freeBlock(int blockId) {
-        if (blockId < 0 || blockId >= numBlocks) {
-            throw new IllegalArgumentException(
-                "Invalid blockId: " + blockId + ". Must be in range [0, " + (numBlocks - 1) + "]"
-            );
-        }
-        if (freeBlocks.contains(blockId)) {
+        checkBlockId(blockId);
+        if (refCounts[blockId] == 0) {
             throw new IllegalStateException("Double-free detected for blockId: " + blockId);
         }
-        freeBlocks.push(blockId);
+        refCounts[blockId]--;
+        if (refCounts[blockId] == 0) {
+            freeBlocks.push(blockId);
+        }
     }
 
     /**

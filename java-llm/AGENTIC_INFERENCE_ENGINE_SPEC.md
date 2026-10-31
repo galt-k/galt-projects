@@ -62,7 +62,7 @@ Before starting Milestone 1, we treat ONLY these primitives as known:
 
 ---
 
-### Milestone 3: Deterministic Grammar & Schema Enforcement — `FSMLogitMasker.java` [ACTIVE]
+### Milestone 3: Deterministic Grammar & Schema Enforcement — `FSMLogitMasker.java` [COMPLETED]
 *(Outlines & XGrammar Pushdown/FSM Bitmask Compilation)*
 - **First-Principles Problem:** Only introduce after Milestone 2 is complete. Syntax failures and JSON schema violations resulting from unconstrained stochastic token selection during structured agent tool calls.
 - **Business Implication:** Downstream parser crashes, broken automated microservice integrations, and expensive error-handling retry loops.
@@ -77,18 +77,18 @@ Before starting Milestone 1, we treat ONLY these primitives as known:
 
 ---
 
-### Milestone 4: Uncertainty Quantification & Copy-on-Write Tree Search — `EntropyBranchScheduler.java`
+### Milestone 4: Uncertainty Quantification & Copy-on-Write Tree Search — `EntropyBranchScheduler.java` [COMPLETED]
 *(Test-Time Compute Scaling & Entropix Uncertainty Sampling)*
 - **First-Principles Problem:** Only introduce after Milestone 3 is complete. Irreversible execution errors and local optimization traps caused by single-path greedy decoding during high-uncertainty decision steps.
 - **Business Implication:** Unreliable agent decision-making in complex operational environments, raising the risk of high-stakes automation failures.
 - **Top-Down Contract:**
     - At each step, compute **Shannon Entropy** $\mathcal{H}(p)$ (in bits) and **Varentropy** $\mathcal{V}(p)$ over the masked probability distribution $p$.
-    - Whenever $\mathcal{H}(p) > \tau$, fork the active sequence into $K$ parallel branches by cloning only the `int[] blockTable` (`refCount++` on full blocks, Copy-on-Write for any partially filled tail block), roll out the branches, and select the trajectory maximizing length-normalized cumulative log-likelihood:
+    - Whenever $\mathcal{H}(p) > \tau$, fork the active sequence into up to $K$ independent branches (executed sequentially in this reference implementation, subject to a global leaf budget) by cloning only the `int[] blockTable` (`refCount++` on full blocks, Copy-on-Write for any partially filled tail block), roll out the branches, and select the trajectory maximizing length-normalized cumulative log-likelihood:
       $$\text{Score}(Y) = \frac{1}{|Y|} \sum_{t=1}^{|Y|} \ln P(y_t \mid y_{<t})$$
 - **Bottom-Up Math & Mechanics:**
   $$\mathcal{H}(p) = -\sum_{v: p_v > 10^{-12}} p_v \log_2(p_v), \quad \mathcal{V}(p) = \sum_{v: p_v > 10^{-12}} p_v \left(-\log_2 p_v - \mathcal{H}(p)\right)^2$$
 - **Verification Target (Milestone 4 Ground Truth):**
-    - Using Fixture D in Section 5, verify that at State 2 (`p_2 = 0.52, p_3 = 0.48`), $\mathcal{H}(p) = 0.9988455\text{ bits} > \tau = 0.80$, triggering a 2-way CoW fork that rejects the greedy `"ALLOW"` trap (cumulative score `-2.2633f`) in favor of `"BLOCK"` (cumulative score `-0.7853f`).
+    - Using Fixture D in Section 5, verify that at State 2 (`p_2 = 0.52, p_3 = 0.48`), $\mathcal{H}(p) = 0.9988455\text{ bits} > \tau = 0.80$, triggering a 2-way CoW fork. With the explicit continuation probabilities below, greedy ALLOW has cumulative log-probability `-1.34707365` and average score `-0.26941473`; the winning BLOCK path has cumulative log-probability `-0.74401951` and average score `-0.14880390`. Both outputs contain five scored tokens, including EOS.
 
 ---
 
@@ -252,13 +252,41 @@ int[][] FSM_TRANSITIONS = {
 ```
 
 ### D. Milestone 4 Ground Truth: Shannon Entropy & Decision Trap Fixture
-```java
-float[] PROBS_STATE_2 = { 0.0f, 0.0f, 0.52f, 0.48f, 0.0f, 0.0f, 0.0f, 0.0f };
-float EXPECTED_ENTROPY_BITS_STATE_2 = 0.9988455f;
 
-float[] PROBS_STATE_0 = { 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+This is a synthetic token-level search fixture, separate from Fixture C's strict JSON grammar. Fixture C forces all suffix tokens after ALLOW/BLOCK, so their masked probabilities are 1 and cannot reverse the initial ranking. This extended FSM adds a genuine later choice on each path; token IDs 4 and 6 represent alternative continuation tokens here.
+
+```java
+float[] PROBS_STATE_2 = {0, 0, 0.52f, 0.48f, 0, 0, 0, 0};
+float EXPECTED_ENTROPY_BITS_STATE_2 = 0.9988455f;
+float[] PROBS_STATE_0 = {1, 0, 0, 0, 0, 0, 0, 0};
 float EXPECTED_ENTROPY_BITS_STATE_0 = 0.0f;
+
+int[][] SEARCH_TRANSITIONS = {
+    { 1, -1, -1, -1, -1, -1, -1, -1},
+    {-1,  2, -1, -1, -1, -1, -1, -1},
+    {-1, -1,  3,  4, -1, -1, -1, -1}, // ALLOW -> state 3, BLOCK -> state 4
+    {-1, -1, -1, -1,  5, -1,  5, -1},
+    {-1, -1, -1, -1,  5, -1,  5, -1},
+    {-1, -1, -1, -1, -1, -1, -1,  6}  // EOS -> terminal state 6
+};
+float[] PROBS_AFTER_ALLOW = {0, 0, 0, 0, 0.50f, 0, 0.50f, 0};
+float[] PROBS_AFTER_BLOCK = {0, 0, 0, 0, 0.99f, 0, 0.01f, 0};
+// All other selections are forced and have masked probability 1.
+// Scripted model supplies log(probability) as legal logits and token 5 = +99.
+int[] PROMPT = {1, 2, 3, 4, 5};
+int MAX_OUTPUT_TOKENS = 5;
+double THRESHOLD_BITS = 0.80;
+int BRANCH_WIDTH = 2;
+int MAX_BRANCHES = 4;
+int[] GREEDY_OUTPUT = {0, 1, 2, 4, 7};
+int[] WINNING_OUTPUT = {0, 1, 3, 4, 7};
+double GREEDY_LOG_SUM = -1.347073647966609; // ln(0.52) + ln(0.50)
+double WINNING_LOG_SUM = -0.744019510933702; // ln(0.48) + ln(0.99)
+double GREEDY_AVERAGE_SCORE = -0.269414729593322;
+double WINNING_AVERAGE_SCORE = -0.148803902186740;
 ```
+
+Verified by `BranchingGenerationTest.completeDecisionTrapFixtureBeatsGreedyWithVerifiedScores`. Equal-score ties keep the first candidate. `RepeatedBranchingTest` separately verifies repeated forks on both continuations, leaf budgets, output limits, and cleanup after nested failures. The winning branch retains its allocated blocks until the caller invokes `releaseBranch`.
 
 ### E. Milestone 5 Ground Truth: Chunked Prefill & Autellix Agent-DAG Priority
 ```java
@@ -328,9 +356,9 @@ int EXPECTED_SELECTED_NODE_ID = 2;
 
 ---
 
-### Ready to Begin Milestone 3 — Step A (Top-Down First-Principles Kickoff)
+### Milestones 1–4 Complete — Ready for Milestone 5
 
-With Milestones 1 and 2 100% complete and verified, we are officially unlocked into **Milestone 3: Deterministic Grammar & Schema Enforcement (`FSMLogitMasker.java`)**.
+Milestones 1–4 are complete in the verified scope recorded below. The next milestone is **Milestone 5: Iteration-Level Continuous Batching, Chunked Prefill & Agentic DAG Priority (`ContinuousBatchScheduler.java`)**; implementation has not started.
 
 ## 6. Execution Progress Log
 - **Milestone 1 (`PagedKVCache`, `FlashPagedAttention`, `CachedAttention`, `CachedTransformerBlock`, `CachedGPTModel`):**
@@ -339,6 +367,16 @@ With Milestones 1 and 2 100% complete and verified, we are officially unlocked i
 - **Milestone 2 (`RadixPrefixCache` & Rectangular Delta-Prefill Attention):**
   - **Status:** `[COMPLETED]` (All 49 tests passing).
   - **Key Invariants Verified:** Multi-turn prefix reuse with zero-copy reference counting; LRU leaf eviction protecting active / ancestor blocks; rectangular `prefillDelta` logits exactly match full prefill from scratch within `1e-5f` (`RadixPrefixCacheTest.java`).
-- **Milestone 3 (`FSMLogitMasker`):**
-  - **Status:** `[ACTIVE]`
-  - **Step A Design Commencing:** Constrained decoding, finite state machine (FSM) schema transition tables, and bitmask logit filtering.
+- **Milestone 3 (`FSMlogitMask` & `ConstrainedGenerator`):**
+  - **Status:** `[COMPLETED]` (Table-driven FSM scope; 12 relevant tests passing across `FSMlogitMaskTest`, `ConstrainedGeneratorTest`, and `CachedGPTModelTest`.)
+  - **Implemented:** Per-state packed multiword vocabulary masks, in-place illegal-logit filtering, validated next-state lookup, and single-sequence greedy constrained generation using actual cached-model prefill/decode.
+  - **Key Invariants Verified:** Fixture C emits `[0, 1, 2, 4, 7]` despite illegal token 5 scoring `+99`; legal logits are preserved; state masks remain independent; word-boundary flags, absolute decode positions, EOS termination, and output limits are covered.
+  - **Scope:** Accepts prebuilt schema transition tables; a general JSON-schema-to-FSM compiler is not implemented. The actual implementation class is named `FSMlogitMask`, corresponding to the planned `FSMLogitMasker`.
+- **Milestone 4 (`EntropyBranchScheduler`):**
+  - **Status:** `[COMPLETED]` (Bounded, sequential repeated-branching reference implementation.)
+  - **Implemented:** Entropy/varentropy, stable masked softmax, branch scoring, branch-local state, physical-block ownership counts, rollback-safe forks, tail copy-on-write, greedy rollouts, winner selection, and loser/error cleanup.
+  - **Integrated:** `generateWithBranching` prefills a fresh prompt, checks entropy at every selection on every active continuation, explores up to K distinct positive-probability tokens per fork, and returns the highest average log-probability leaf. A global `maxBranches` budget (default 64, including completed leaves) bounds search; once consumed, remaining selections are greedy. The caller releases the winner using `releaseBranch`.
+  - **Verified:** Controlled continuation tests demonstrate a lower-probability initial choice winning after rollout; actual cached-model integration exercises both branches and cleanup. Repeated-branch tests cover all four two-level paths, global leaf limits, output limits, nested failure cleanup, and allocation exhaustion. Inference tests pass.
+  - **Current Scope:** Repeated branching is implemented with sequential candidate execution and a global leaf budget. Prefix-cache integration and concurrent execution are not implemented. This records the completed reference scope; concurrent execution and prefix-cache integration remain outside this milestone implementation.
+  - **Fixture D Resolved:** Section 5 now specifies the extended synthetic grammar, continuation probabilities, outputs, and cumulative/average scores verified by the decision-trap test. The original unsupported score constants have been replaced.
+  - **Validation:** Full Maven test suite passed after repeated branching; the final explicit fixture-score test and repeated-branch tests also passed after adding that verification.

@@ -5,6 +5,38 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 class PagedKVCacheTest {
+    @Test
+    void sharedBlockIsRecycledOnlyAfterLastOwnerReleasesIt() {
+        PagedKVCache cache = new PagedKVCache(1, 1, 1, 4, 2);
+        int block = cache.allocateBlock();
+        assertEquals(1, cache.getRefCount(block));
+        cache.writeKV(block, 0, 0, 0, new float[]{2, 3}, 0, new float[]{4, 5}, 0);
+        cache.retainBlock(block);
+        assertEquals(2, cache.getRefCount(block));
+
+        cache.freeBlock(block);
+        assertEquals(1, cache.getRefCount(block));
+        assertEquals(0, cache.getNumFreeBlocks());
+        assertThrows(IllegalStateException.class, cache::allocateBlock);
+        assertEquals(2.0f, cache.getKeyData()[cache.getOffset(block, 0, 0, 0)]);
+
+        cache.freeBlock(block);
+        assertEquals(0, cache.getRefCount(block));
+        assertEquals(1, cache.getNumFreeBlocks());
+        assertEquals(block, cache.allocateBlock());
+        assertEquals(1, cache.getRefCount(block));
+    }
+
+    @Test
+    void rejectsRetainingFreeBlocksAndInvalidReferenceLookups() {
+        PagedKVCache cache = new PagedKVCache(1, 1, 1, 4, 2);
+        assertEquals(0, cache.getRefCount(0));
+        assertThrows(IllegalStateException.class, () -> cache.retainBlock(0));
+        assertThrows(IllegalArgumentException.class, () -> cache.retainBlock(-1));
+        assertThrows(IllegalArgumentException.class, () -> cache.retainBlock(1));
+        assertThrows(IllegalArgumentException.class, () -> cache.getRefCount(-1));
+        assertThrows(IllegalArgumentException.class, () -> cache.getRefCount(1));
+    }
 
     @Test
     void testInitializationAndCapacity() {
